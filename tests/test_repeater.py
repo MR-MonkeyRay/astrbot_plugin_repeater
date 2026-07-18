@@ -1,13 +1,31 @@
 import asyncio
 import copy
+import json
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+from pathlib import Path
 
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Face, Image, Plain
 
 from main import DEFAULT_INTERRUPT_TEXT, PERMISSION_ERROR, RepeaterPlugin
+
+class ConfigSchemaTest(unittest.TestCase):
+    def test_slider_fields_use_expected_ranges(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        expected_sliders = {
+            "repeat_threshold": ("int", {"min": 2, "max": 50, "step": 1}),
+            "repeat_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
+            "interrupt_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
+        }
+        for key, (field_type, slider) in expected_sliders.items():
+            with self.subTest(key=key):
+                field = schema[key]
+                self.assertEqual(field["type"], field_type)
+                self.assertEqual(field["slider"], slider)
 
 
 class FakeEvent:

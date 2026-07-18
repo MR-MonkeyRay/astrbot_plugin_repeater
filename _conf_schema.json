@@ -7,17 +7,19 @@
   "repeat_disabled_group_ids": {
     "type": "list",
     "default": [],
-    "description": "关闭复读的 QQ 群号"
+    "description": "关闭复读功能的 QQ 群号"
   },
   "repeat_threshold": {
     "type": "int",
     "default": 3,
+    "slider": {"min": 2, "max": 50, "step": 1},
     "description": "发送相同内容的不同用户数"
   },
   "repeat_probability": {
     "type": "float",
     "default": 0.3,
-    "description": "复读的概率"
+    "slider": {"min": 0, "max": 1, "step": 0.01},
+    "description": "复读概率（0%–100%）"
   },
   "interrupt_default_enabled": {
     "type": "bool",
@@ -27,12 +29,13 @@
   "interrupt_disabled_group_ids": {
     "type": "list",
     "default": [],
-    "description": "关闭打断复读的 QQ 群号"
+    "description": "关闭打断复读功能的 QQ 群号"
   },
   "interrupt_probability": {
     "type": "float",
     "default": 0.1,
-    "description": "优先发送打断文本的概率"
+    "slider": {"min": 0, "max": 1, "step": 0.01},
+    "description": "优先发送打断文本的概率（0%–100%）"
   },
   "interrupt_texts": {
     "type": "list",
