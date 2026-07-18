@@ -1,11 +1,20 @@
 import asyncio
+import copy
 import hashlib
+import json
 import random
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import (
+    BaseMessageComponent,
+    ComponentType,
+    Plain,
+)
 from astrbot.api.star import Context, Star
 
 DEFAULT_INTERRUPT_TEXT = "打断！"
@@ -14,6 +23,29 @@ PERMISSION_ERROR = (
     "权限错误：仅 AstrBot 管理员、群主或群管理员可以开启或关闭。"
     "请向本群管理员或群主求助。"
 )
+
+class RawOneBotSegment(BaseMessageComponent):
+    """AstrBot 尚未建模、但 OneBot 可以原样回发的消息段。"""
+
+    type: ComponentType = ComponentType.Unknown
+    segment_type: str
+    data: dict[str, Any]
+
+    def __init__(self, segment_type: str, data: dict[str, Any]) -> None:
+        super().__init__(segment_type=segment_type, data=copy.deepcopy(data))
+
+    def toDict(self) -> dict[str, Any]:
+        return {"type": self.segment_type, "data": self.data}
+
+
+@dataclass(frozen=True, slots=True)
+class RepeatableMessage:
+    """用于判重和回发的规范化消息。"""
+
+    fingerprint: str
+    text: str
+    chain: tuple[BaseMessageComponent, ...]
+    summary: str
 
 
 @dataclass(slots=True)
@@ -78,6 +110,7 @@ class RepeatAttempt:
     message_id: str
     previous_message_id: str
     response_text: str
+    response_chain: tuple[BaseMessageComponent, ...]
     interrupted: bool
 
 
@@ -303,6 +336,171 @@ class RepeaterPlugin(Star):
     def _fingerprint(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+    @classmethod
+    def _chain_fingerprint(cls, identities: list[dict[str, Any]]) -> str:
+        payload = json.dumps(
+            ["message-chain-v1", identities],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        return cls._fingerprint(payload)
+
+    @classmethod
+    def _canonical_value(cls, value: Any) -> Any:
+        if isinstance(value, Enum):
+            return value.value
+        if isinstance(value, Mapping):
+            return {
+                str(key): cls._canonical_value(item)
+                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._canonical_value(item) for item in value]
+        if isinstance(value, set):
+            return sorted(
+                (cls._canonical_value(item) for item in value),
+                key=repr,
+            )
+        if isinstance(value, bytes):
+            return {"sha256": hashlib.sha256(value).hexdigest()}
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    @classmethod
+    def _segment_identity(
+        cls,
+        segment_type: str,
+        data: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        normalized_type = segment_type.lower()
+        if normalized_type in {"plain", "text"}:
+            return {
+                "type": "text",
+                "text": str(data.get("text", "")).strip(),
+            }
+        if normalized_type == "image":
+            file_id = str(data.get("file") or "")
+            url = str(data.get("url") or "")
+            return {
+                "type": "image",
+                "id": file_id or url,
+                "sub_type": str(data.get("sub_type") or data.get("type") or ""),
+            }
+        if normalized_type == "face":
+            return {"type": "face", "id": str(data.get("id") or "")}
+        if normalized_type == "mface":
+            emoji_id = str(data.get("emoji_id") or "")
+            package_id = str(data.get("emoji_package_id") or "")
+            if emoji_id or package_id:
+                identity: dict[str, Any] = {
+                    "emoji_id": emoji_id,
+                    "emoji_package_id": package_id,
+                }
+            else:
+                identity = {
+                    "id": str(
+                        data.get("key")
+                        or data.get("file")
+                        or data.get("url")
+                        or ""
+                    ),
+                }
+            return {"type": "mface", **identity}
+        return {
+            "type": normalized_type,
+            "data": cls._canonical_value(data),
+        }
+
+    @staticmethod
+    def _raw_onebot_segments(event: AstrMessageEvent) -> list[dict[str, Any]] | None:
+        raw_message = getattr(event.message_obj, "raw_message", None)
+        if isinstance(raw_message, Mapping):
+            raw_segments = raw_message.get("message")
+        else:
+            raw_segments = getattr(raw_message, "message", None)
+        if not isinstance(raw_segments, list):
+            return None
+
+        segments: list[dict[str, Any]] = []
+        for segment in raw_segments:
+            if not isinstance(segment, Mapping):
+                return None
+            segment_type = segment.get("type")
+            data = segment.get("data")
+            if not isinstance(segment_type, str) or not isinstance(data, Mapping):
+                return None
+            segments.append({"type": segment_type, "data": dict(data)})
+        if not any(segment["type"].lower() == "mface" for segment in segments):
+            return None
+        return segments
+
+    @classmethod
+    def _repeatable_message(
+        cls,
+        event: AstrMessageEvent,
+    ) -> RepeatableMessage | None:
+        text = event.get_message_str().strip()
+        raw_segments = cls._raw_onebot_segments(event)
+        if raw_segments is not None:
+            identities = [
+                cls._segment_identity(segment["type"], segment["data"])
+                for segment in raw_segments
+            ]
+            chain = tuple(
+                RawOneBotSegment(segment["type"], segment["data"])
+                for segment in raw_segments
+            )
+            labels = " ".join(f"[{segment['type']}]" for segment in raw_segments)
+            return RepeatableMessage(
+                fingerprint=cls._chain_fingerprint(identities),
+                text=text,
+                chain=chain,
+                summary=text or labels,
+            )
+
+        get_messages = getattr(event, "get_messages", None)
+        chain = tuple(get_messages()) if callable(get_messages) else ()
+        if not chain:
+            if not text:
+                return None
+            return RepeatableMessage(
+                fingerprint=cls._fingerprint(text),
+                text=text,
+                chain=(),
+                summary=text,
+            )
+
+        if all(isinstance(component, Plain) for component in chain):
+            if not text:
+                text = "".join(component.text for component in chain).strip()
+            if not text:
+                return None
+            return RepeatableMessage(
+                fingerprint=cls._fingerprint(text),
+                text=text,
+                chain=(),
+                summary=text,
+            )
+
+        identities: list[dict[str, Any]] = []
+        labels: list[str] = []
+        for component in chain:
+            serialized = component.toDict()
+            segment_type = str(serialized.get("type") or component.type.value)
+            data = serialized.get("data")
+            if not isinstance(data, Mapping):
+                data = {}
+            identities.append(cls._segment_identity(segment_type, data))
+            labels.append(f"[{segment_type}]")
+        return RepeatableMessage(
+            fingerprint=cls._chain_fingerprint(identities),
+            text=text,
+            chain=chain,
+            summary=text or " ".join(labels),
+        )
+
     def _begin_handler(self) -> asyncio.Task | None:
         if self.shutting_down:
             return None
@@ -332,8 +530,8 @@ class RepeaterPlugin(Star):
         if event.get_sender_id() == event.get_self_id():
             return
 
-        text = event.get_message_str().strip()
-        if not text:
+        message = self._repeatable_message(event)
+        if message is None:
             return
 
         group_key = self._group_key(event)
@@ -348,14 +546,19 @@ class RepeaterPlugin(Star):
                 event,
                 group_key,
                 event.get_sender_id(),
-                text,
+                message,
             )
 
         if attempt is None:
             return
 
+        result = (
+            event.chain_result(list(attempt.response_chain))
+            if attempt.response_chain
+            else event.plain_result(attempt.response_text)
+        )
         try:
-            await event.send(event.plain_result(attempt.response_text))
+            await event.send(result)
         except Exception:
             try:
                 await self._rollback_attempt(group_key, attempt)
@@ -380,7 +583,7 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         group_key: str,
         sender_id: str,
-        text: str,
+        message: RepeatableMessage,
     ) -> RepeatAttempt | None:
         async with self.save_lock:
             state = self._state_for(group_key)
@@ -396,7 +599,7 @@ class RepeaterPlugin(Star):
             if message_id:
                 state.last_message_id = message_id
 
-            fingerprint = self._fingerprint(text)
+            fingerprint = message.fingerprint
             if fingerprint != state.last_fingerprint:
                 previous_fingerprint = state.last_fingerprint
                 previous_users = state.repeated_users
@@ -433,8 +636,11 @@ class RepeaterPlugin(Star):
             )
             if interrupted or should_repeat:
                 response_text = (
-                    random.choice(self.interrupt_texts) if interrupted else text
+                    random.choice(self.interrupt_texts)
+                    if interrupted
+                    else message.summary
                 )
+                response_chain = () if interrupted else message.chain
                 state.pending_fingerprints.add(fingerprint)
                 try:
                     await self._save_locked()
@@ -449,6 +655,7 @@ class RepeaterPlugin(Star):
                     message_id=message_id,
                     previous_message_id=previous_message_id,
                     response_text=response_text,
+                    response_chain=response_chain,
                     interrupted=interrupted,
                 )
 

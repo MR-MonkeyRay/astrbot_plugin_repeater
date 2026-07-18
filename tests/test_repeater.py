@@ -5,6 +5,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 
 from astrbot.core.star.star_handler import star_handlers_registry
+from astrbot.api.message_components import Face, Image, Plain
 
 from main import DEFAULT_INTERRUPT_TEXT, PERMISSION_ERROR, RepeaterPlugin
 
@@ -19,6 +20,8 @@ class FakeEvent:
         *,
         wake: bool = False,
         fail_send: bool = False,
+        chain: list | None = None,
+        raw_message: object | None = None,
         astrbot_admin: bool | None = None,
         group_owner: str = "",
         group_admins: list[str] | None = None,
@@ -28,8 +31,13 @@ class FakeEvent:
         self.sender_id = sender_id
         self.text = text
         self.is_at_or_wake_command = wake
-        self.message_obj = SimpleNamespace(message_id=message_id)
-        self.sent: list[str] = []
+        message_chain = chain if chain is not None else ([Plain(text)] if text else [])
+        self.message_obj = SimpleNamespace(
+            message_id=message_id,
+            message=message_chain,
+            raw_message=raw_message,
+        )
+        self.sent: list[object] = []
         self.stopped = False
         self.fail_send = fail_send
         self.astrbot_admin = (
@@ -47,6 +55,9 @@ class FakeEvent:
 
     def get_message_str(self) -> str:
         return self.text
+
+    def get_messages(self) -> list:
+        return self.message_obj.message
 
     def get_platform_id(self) -> str:
         return "onebot"
@@ -68,7 +79,10 @@ class FakeEvent:
     def plain_result(self, text: str) -> str:
         return text
 
-    async def send(self, result: str) -> None:
+    def chain_result(self, chain: list) -> list:
+        return chain
+
+    async def send(self, result: object) -> None:
         if self.fail_send:
             raise RuntimeError("send failed")
         self.sent.append(result)
@@ -83,7 +97,7 @@ class DelayedEvent(FakeEvent):
         self.send_started = asyncio.Event()
         self.release_send = asyncio.Event()
 
-    async def send(self, result: str) -> None:
+    async def send(self, result: object) -> None:
         self.send_started.set()
         await self.release_send.wait()
         await super().send(result)
@@ -94,7 +108,7 @@ class FailNextPutAfterSendEvent(FakeEvent):
         super().__init__(*args, **kwargs)
         self.plugin = plugin
 
-    async def send(self, result: str) -> None:
+    async def send(self, result: object) -> None:
         try:
             await super().send(result)
         finally:
@@ -264,6 +278,129 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         for event in post_restart:
             await reloaded.on_group_message(event)
         self.assertTrue(all(not event.sent for event in post_restart))
+
+    async def test_same_image_or_face_repeats_original_chain(self) -> None:
+        image_plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        await image_plugin.initialize()
+        first_image = FakeEvent(
+            "image",
+            "A",
+            "",
+            "1",
+            chain=[Image(file="same-image", url="https://first.example/image")],
+        )
+        second_image = FakeEvent(
+            "image",
+            "B",
+            "",
+            "2",
+            chain=[Image(file="same-image", url="https://second.example/image")],
+        )
+        await image_plugin.on_group_message(first_image)
+        await image_plugin.on_group_message(second_image)
+
+        self.assertFalse(first_image.sent)
+        self.assertEqual(len(second_image.sent), 1)
+        image_chain = second_image.sent[0]
+        self.assertIsInstance(image_chain, list)
+        self.assertIsInstance(image_chain[0], Image)
+        self.assertEqual(image_chain[0].file, "same-image")
+
+        face_plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        await face_plugin.initialize()
+        first_face = FakeEvent("face", "A", "", "1", chain=[Face(id=123)])
+        second_face = FakeEvent("face", "B", "", "2", chain=[Face(id=123)])
+        await face_plugin.on_group_message(first_face)
+        await face_plugin.on_group_message(second_face)
+
+        self.assertEqual(len(second_face.sent), 1)
+        face_chain = second_face.sent[0]
+        self.assertIsInstance(face_chain[0], Face)
+        self.assertEqual(face_chain[0].id, 123)
+
+    async def test_different_media_does_not_share_a_sequence(self) -> None:
+        plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        await plugin.initialize()
+        first = FakeEvent(
+            "different-media",
+            "A",
+            "相同说明",
+            "1",
+            chain=[Plain("相同说明"), Image(file="image-a")],
+        )
+        second = FakeEvent(
+            "different-media",
+            "B",
+            "相同说明",
+            "2",
+            chain=[Plain("相同说明"), Image(file="image-b")],
+        )
+        await plugin.on_group_message(first)
+        await plugin.on_group_message(second)
+
+        self.assertFalse(first.sent)
+        self.assertFalse(second.sent)
+        self.assertEqual(plugin.group_states["different-media"].repeated_users, {"B"})
+
+    async def test_onebot_mface_uses_raw_identity_and_replays_in_order(self) -> None:
+        plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        await plugin.initialize()
+
+        def mface_event(sender: str, message_id: str, emoji_id: str, url: str):
+            raw_segments = [
+                {"type": "text", "data": {"text": "前缀"}},
+                {
+                    "type": "mface",
+                    "data": {
+                        "emoji_package_id": "package",
+                        "emoji_id": emoji_id,
+                        "key": f"key-{url}",
+                        "url": url,
+                    },
+                },
+            ]
+            return FakeEvent(
+                "mface",
+                sender,
+                "前缀",
+                message_id,
+                chain=[Plain("前缀")],
+                raw_message={"message": raw_segments},
+            )
+
+        first = mface_event("A", "1", "same", "https://first.example/mface")
+        second = mface_event("B", "2", "same", "https://second.example/mface")
+        await plugin.on_group_message(first)
+        await plugin.on_group_message(second)
+
+        self.assertEqual(len(second.sent), 1)
+        replayed = second.sent[0]
+        self.assertEqual(
+            [segment.toDict()["type"] for segment in replayed],
+            ["text", "mface"],
+        )
+        self.assertEqual(replayed[1].toDict()["data"]["emoji_id"], "same")
+
+        different = mface_event("C", "3", "different", "https://third.example/mface")
+        await plugin.on_group_message(different)
+        self.assertFalse(different.sent)
+
+    async def test_media_interrupt_sends_interrupt_text_only(self) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("media-interrupt", "A", "", "1", chain=[Face(id=456)])
+        second = FakeEvent("media-interrupt", "B", "", "2", chain=[Face(id=456)])
+        await plugin.on_group_message(first)
+        await plugin.on_group_message(second)
+
+        self.assertEqual(second.sent, [DEFAULT_INTERRUPT_TEXT])
 
     async def test_empty_interrupt_texts_sends_default_text(self) -> None:
         plugin = MemoryRepeater(
