@@ -1,11 +1,12 @@
 import asyncio
 import copy
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 from astrbot.core.star.star_handler import star_handlers_registry
 
-from main import RepeaterPlugin
+from main import DEFAULT_INTERRUPT_TEXTS, RepeaterPlugin
 
 
 class FakeEvent:
@@ -87,15 +88,15 @@ class MemoryRepeater(RepeaterPlugin):
         *,
         put_delay: float = 0,
     ) -> None:
-        super().__init__(
-            None,
-            config
-            or {
-                "default_enabled": True,
-                "repeat_threshold": 3,
-                "repeat_probability": 1.0,
-            },
-        )
+        effective_config = {
+            "default_enabled": True,
+            "repeat_threshold": 3,
+            "repeat_probability": 1.0,
+            "interrupt_default_enabled": False,
+        }
+        if config is not None:
+            effective_config.update(config)
+        super().__init__(None, effective_config)
         self.store = store
         self.put_delay = put_delay
         self.fail_next_put = False
@@ -143,6 +144,14 @@ async def run_command(
     return [result async for result in plugin.repeater_command(event, action)]
 
 
+async def run_interrupt_command(
+    plugin: RepeaterPlugin,
+    event: FakeEvent,
+    action: str,
+) -> list[str]:
+    return [result async for result in plugin.interrupt_command(event, action)]
+
+
 class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     def test_default_repeat_probability_is_thirty_percent(self) -> None:
         self.assertEqual(RepeaterPlugin(None, {}).repeat_probability, 0.3)
@@ -150,6 +159,31 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             RepeaterPlugin(None, {"repeat_probability": "invalid"}).repeat_probability,
             0.3,
         )
+
+    def test_interrupt_config_defaults_and_invalid_values(self) -> None:
+        plugin = RepeaterPlugin(None, {})
+        self.assertTrue(plugin.interrupt_default_enabled)
+        self.assertEqual(plugin.interrupt_probability, 0.1)
+        self.assertEqual(plugin.interrupt_texts, DEFAULT_INTERRUPT_TEXTS)
+        self.assertEqual(len(plugin.interrupt_texts), 3)
+
+        invalid = RepeaterPlugin(
+            None,
+            {
+                "interrupt_default_enabled": "yes",
+                "interrupt_probability": "invalid",
+                "interrupt_texts": ["", 1, "   "],
+            },
+        )
+        self.assertTrue(invalid.interrupt_default_enabled)
+        self.assertEqual(invalid.interrupt_probability, 0.1)
+        self.assertEqual(invalid.interrupt_texts, DEFAULT_INTERRUPT_TEXTS)
+
+        custom = RepeaterPlugin(
+            None,
+            {"interrupt_texts": [" 第一条 ", "", 2, "第二条"]},
+        )
+        self.assertEqual(custom.interrupt_texts, ("第一条", "第二条"))
 
     async def test_distinct_users_and_permanent_repeat_suppression(self) -> None:
         store: dict = {}
@@ -187,6 +221,65 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         for event in post_restart:
             await reloaded.on_group_message(event)
         self.assertTrue(all(not event.sent for event in post_restart))
+
+    async def test_interrupt_preempts_repeat_and_randomly_selects_text(self) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "default_enabled": True,
+                "repeat_threshold": 2,
+                "repeat_probability": 1.0,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["打断甲", "打断乙", "打断丙"],
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("interrupt", "A", "原始复读内容", "1")
+        second = FakeEvent("interrupt", "B", "原始复读内容", "2")
+
+        with (
+            patch("main.random.random", return_value=0.0),
+            patch("main.random.choice", return_value="打断乙") as choice_mock,
+        ):
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
+
+        self.assertFalse(first.sent)
+        self.assertEqual(second.sent, ["打断乙"])
+        self.assertTrue(second.stopped)
+        choice_mock.assert_called_once_with(("打断甲", "打断乙", "打断丙"))
+        self.assertIn(
+            plugin._fingerprint("原始复读内容"),
+            plugin.group_states["onebot:interrupt"].repeated_fingerprints,
+        )
+
+    async def test_interrupt_miss_falls_through_to_normal_repeat(self) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "default_enabled": True,
+                "repeat_threshold": 2,
+                "repeat_probability": 1.0,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 0.1,
+                "interrupt_texts": ["不会发送"],
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("fallthrough", "A", "继续复读", "1")
+        second = FakeEvent("fallthrough", "B", "继续复读", "2")
+
+        with (
+            patch("main.random.random", side_effect=[0.9, 0.0]) as random_mock,
+            patch("main.random.choice") as choice_mock,
+        ):
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
+
+        self.assertEqual(second.sent, ["继续复读"])
+        self.assertEqual(random_mock.call_count, 2)
+        choice_mock.assert_not_called()
 
     async def test_new_sequence_save_failure_restores_memory_and_can_retry(
         self,
@@ -400,6 +493,37 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(open_reply, ["已在本群开启自动复读。"])
         self.assertTrue(plugin._is_enabled(plugin._state_for("onebot:group-a")))
 
+    async def test_interrupt_command_has_independent_persisted_state(self) -> None:
+        store: dict = {}
+        plugin = MemoryRepeater(store)
+        await plugin.initialize()
+        event = FakeEvent("interrupt-command", "admin", "/打断复读 查看", "1")
+
+        status_reply = await run_interrupt_command(plugin, event, "查看")
+        open_reply = await run_interrupt_command(plugin, event, "开启")
+
+        state = plugin.group_states["onebot:interrupt-command"]
+        self.assertEqual(status_reply[0].splitlines()[0], "本群打断复读：关闭")
+        self.assertEqual(open_reply, ["已在本群开启打断复读。"])
+        self.assertTrue(plugin._is_interrupt_enabled(state))
+        self.assertTrue(plugin._is_enabled(state))
+        self.assertTrue(
+            store["group_states"]["onebot:interrupt-command"][
+                "interrupt_enabled_override"
+            ]
+        )
+
+        reloaded = MemoryRepeater(store)
+        await reloaded.initialize()
+        reloaded_state = reloaded.group_states["onebot:interrupt-command"]
+        self.assertTrue(reloaded._is_interrupt_enabled(reloaded_state))
+        close_reply = await run_interrupt_command(reloaded, event, "关闭")
+        self.assertEqual(close_reply, ["已在本群关闭打断复读。"])
+        self.assertFalse(reloaded._is_interrupt_enabled(reloaded_state))
+
+        help_reply = await run_interrupt_command(reloaded, event, "帮助")
+        self.assertIn("打断复读 查看", help_reply[0])
+
     async def test_command_save_failure_restores_group_state(self) -> None:
         store: dict = {}
         plugin = MemoryRepeater(store)
@@ -542,6 +666,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(command_filter.command_name, "自动复读")
         self.assertIn("repeatMsg", command_filter.alias)
+
+    def test_interrupt_repeat_alias_is_registered(self) -> None:
+        handlers = [
+            handler
+            for handler in star_handlers_registry
+            if handler.handler_name == "interrupt_command"
+        ]
+        self.assertTrue(handlers)
+        command_filter = next(
+            event_filter
+            for event_filter in handlers[-1].event_filters
+            if hasattr(event_filter, "command_name")
+        )
+        self.assertEqual(command_filter.command_name, "打断复读")
+        self.assertIn("interruptRepeat", command_filter.alias)
 
 
 if __name__ == "__main__":
