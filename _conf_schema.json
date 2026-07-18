@@ -2,35 +2,43 @@
   "default_enabled": {
     "type": "bool",
     "default": true,
-    "description": "新群的默认复读开关（群未单独设置时生效）"
+    "description": "是否默认开启复读"
+  },
+  "repeat_disabled_group_ids": {
+    "type": "list",
+    "default": [],
+    "description": "关闭复读的 QQ 群号"
   },
   "repeat_threshold": {
     "type": "int",
     "default": 3,
-    "description": "触发复读所需的独立用户数（含原始发送者，必须 >= 2）"
+    "description": "发送相同内容的不同用户数"
   },
   "repeat_probability": {
     "type": "float",
     "default": 0.3,
-    "description": "达到阈值后触发复读的概率，范围 0.0-1.0"
+    "description": "复读的概率"
   },
   "interrupt_default_enabled": {
     "type": "bool",
     "default": true,
-    "description": "新群的默认打断复读开关（群未单独设置时生效）"
+    "description": "是否默认开启打断复读"
+  },
+  "interrupt_disabled_group_ids": {
+    "type": "list",
+    "default": [],
+    "description": "关闭打断复读的 QQ 群号"
   },
   "interrupt_probability": {
     "type": "float",
     "default": 0.1,
-    "description": "达到复读阈值后优先发送打断文本的概率，范围 0.0-1.0"
+    "description": "优先发送打断文本的概率"
   },
   "interrupt_texts": {
     "type": "list",
     "default": [
-      "复读机过热，已强制散热！",
-      "检测到人类回声，正在切断循环。",
-      "别复读了，再读群聊就要卡带了！"
+      "打断！"
     ],
-    "description": "打断复读时随机发送的文本列表，至少保留一条非空文本"
+    "description": "打断复读时随机发送的文本；为空时使用“打断！”"
   }
 }

@@ -1,6 +1,6 @@
 name: astrbot_plugin_repeater
 display_name: 复读机
 desc: 自动复读群消息的娱乐插件，支持按群独立开关、概率打断和自定义打断文本。
-version: v1.1.0
+version: v1.1.1
 author: MR-MonkeyRay
 repo: https://github.com/MR-MonkeyRay/astrbot_plugin_repeater

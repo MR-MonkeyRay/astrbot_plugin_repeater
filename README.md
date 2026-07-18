@@ -23,6 +23,8 @@
 - `打断复读 帮助`：显示帮助。
 - `interruptRepeat`：`打断复读` 的英文别名。
 
+`开启`、`关闭` 仅限 AstrBot 管理员、当前群群主或群管理员执行；其他成员会收到权限错误提示。
+
 指令受 AstrBot 的唤醒前缀规则约束，例如默认使用 `/自动复读 查看`。
 
 ## 配置
@@ -30,11 +32,13 @@
 插件首次加载后，AstrBot 根据 `_conf_schema.json` 生成配置文件：
 
 - `default_enabled`：未单独设置过的群是否默认开启，默认 `true`。
+- `repeat_disabled_group_ids`：关闭复读的 QQ 群号列表，由开关指令自动更新。
 - `repeat_threshold`：触发所需独立用户数（含首位发送者），默认 `3`，最小 `2`。
 - `repeat_probability`：达到阈值后每次尝试的触发概率，默认 `0.3`，范围 `0.0`–`1.0`。
 - `interrupt_default_enabled`：未单独设置过的群是否默认开启打断，默认 `true`。
+- `interrupt_disabled_group_ids`：关闭打断复读的 QQ 群号列表，由开关指令自动更新。
 - `interrupt_probability`：达到阈值后优先打断的概率，默认 `0.1`，范围 `0.0`–`1.0`。
-- `interrupt_texts`：命中打断时随机选择的文本列表，默认提供 `3` 条有趣文本。
+- `interrupt_texts`：命中打断时随机选择的文本列表；为空时使用默认文本 `打断！`。
 
 打断与普通复读互斥：命中打断后本次只发送打断文本；未命中打断时，才按 `repeat_probability` 尝试普通复读。
 

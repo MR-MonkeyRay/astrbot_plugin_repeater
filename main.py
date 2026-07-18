@@ -8,10 +8,11 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
-DEFAULT_INTERRUPT_TEXTS = (
-    "复读机过热，已强制散热！",
-    "检测到人类回声，正在切断循环。",
-    "别复读了，再读群聊就要卡带了！",
+DEFAULT_INTERRUPT_TEXT = "打断！"
+
+PERMISSION_ERROR = (
+    "权限错误：仅 AstrBot 管理员、群主或群管理员可以开启或关闭。"
+    "请向本群管理员或群主求助。"
 )
 
 
@@ -30,15 +31,12 @@ class GroupRepeaterState:
     @classmethod
     def from_dict(cls, raw_state: dict[str, Any]) -> "GroupRepeaterState":
         """从持久化字典恢复状态。"""
-        enabled_override = raw_state.get("enabled_override")
         return cls(
             enabled_override=(
-                enabled_override if isinstance(enabled_override, bool) else None
+                True if raw_state.get("enabled_override") is True else None
             ),
             interrupt_enabled_override=(
-                raw_state.get("interrupt_enabled_override")
-                if isinstance(raw_state.get("interrupt_enabled_override"), bool)
-                else None
+                True if raw_state.get("interrupt_enabled_override") is True else None
             ),
             last_fingerprint=str(raw_state.get("last_fingerprint", "")),
             repeated_users=cls._load_string_set(
@@ -88,7 +86,15 @@ class RepeaterPlugin(Star):
 
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context, config)
-        self.config = config or {}
+        self.config = config if config is not None else {}
+        self.repeat_disabled_group_ids = self._load_group_ids(
+            self.config.get("repeat_disabled_group_ids", []),
+            "repeat_disabled_group_ids",
+        )
+        self.interrupt_disabled_group_ids = self._load_group_ids(
+            self.config.get("interrupt_disabled_group_ids", []),
+            "interrupt_disabled_group_ids",
+        )
 
         threshold = self.config.get("repeat_threshold", 3)
         if (
@@ -137,7 +143,7 @@ class RepeaterPlugin(Star):
 
         raw_interrupt_texts = self.config.get(
             "interrupt_texts",
-            DEFAULT_INTERRUPT_TEXTS,
+            (DEFAULT_INTERRUPT_TEXT,),
         )
         if isinstance(raw_interrupt_texts, (list, tuple)):
             interrupt_texts = tuple(
@@ -151,7 +157,7 @@ class RepeaterPlugin(Star):
             logger.warning(
                 "[repeater] interrupt_texts 非法或为空，回退为默认打断文本",
             )
-            interrupt_texts = DEFAULT_INTERRUPT_TEXTS
+            interrupt_texts = (DEFAULT_INTERRUPT_TEXT,)
         self.interrupt_texts = interrupt_texts
 
         interrupt_default_enabled = self.config.get(
@@ -190,6 +196,19 @@ class RepeaterPlugin(Star):
 
         logger.info(f"[repeater] 已加载 {len(self.group_states)} 个群的复读状态")
 
+    @staticmethod
+    def _load_group_ids(value: Any, field_name: str) -> set[str]:
+        if not isinstance(value, list):
+            logger.warning(f"[repeater] {field_name} 非法，使用空列表")
+            return set()
+        group_ids = set()
+        for item in value:
+            if not isinstance(item, (str, int)) or isinstance(item, bool):
+                continue
+            group_id = str(item).strip()
+            if group_id:
+                group_ids.add(group_id)
+        return group_ids
 
     def _lock_for(self, group_key: str) -> asyncio.Lock:
         lock = self.group_locks.get(group_key)
@@ -205,23 +224,55 @@ class RepeaterPlugin(Star):
             self.group_states[group_key] = state
         return state
 
-    def _is_enabled(self, state: GroupRepeaterState) -> bool:
-        if state.enabled_override is None:
+    def _is_enabled(
+        self,
+        group_id: str,
+        state: GroupRepeaterState | None,
+    ) -> bool:
+        if group_id in self.repeat_disabled_group_ids:
+            return False
+        if state is None or state.enabled_override is None:
             return self.default_enabled
         return state.enabled_override
 
-    def _is_interrupt_enabled(self, state: GroupRepeaterState) -> bool:
-        if state.interrupt_enabled_override is None:
+    def _is_interrupt_enabled(
+        self,
+        group_id: str,
+        state: GroupRepeaterState | None,
+    ) -> bool:
+        if group_id in self.interrupt_disabled_group_ids:
+            return False
+        if state is None or state.interrupt_enabled_override is None:
             return self.interrupt_default_enabled
         return state.interrupt_enabled_override
 
     async def _save_locked(self) -> None:
         """在持有 save_lock 时保存一致快照。"""
         payload = {
-            group_key: state.to_dict()
-            for group_key, state in self.group_states.items()
+            group_key: state.to_dict() for group_key, state in self.group_states.items()
         }
         await self.put_kv_data("group_states", payload)
+
+    def _save_plugin_config(self) -> None:
+        self.config["repeat_disabled_group_ids"] = sorted(
+            self.repeat_disabled_group_ids,
+        )
+        self.config["interrupt_disabled_group_ids"] = sorted(
+            self.interrupt_disabled_group_ids,
+        )
+        save_config = getattr(self.config, "save_config", None)
+        if callable(save_config):
+            save_config()
+
+    async def _save_group_settings_locked(self) -> None:
+        self._save_plugin_config()
+        await self._save_locked()
+
+    def _restore_plugin_config_after_failure(self) -> None:
+        try:
+            self._save_plugin_config()
+        except Exception:
+            logger.exception("[repeater] 插件配置回滚保存失败")
 
     async def _save(self) -> None:
         """串行保存所有群状态，避免并发快照覆盖。"""
@@ -230,7 +281,23 @@ class RepeaterPlugin(Star):
 
     @staticmethod
     def _group_key(event: AstrMessageEvent) -> str:
-        return f"{event.get_platform_id()}:{event.get_group_id()}"
+        return str(event.get_group_id())
+
+    @staticmethod
+    async def _can_manage_group(event: AstrMessageEvent) -> bool:
+        if event.is_admin():
+            return True
+        try:
+            group = await event.get_group()
+        except Exception as exc:
+            logger.warning(f"[repeater] 获取群成员权限失败: {exc}")
+            return False
+        if group is None:
+            return False
+        sender_id = str(event.get_sender_id())
+        if sender_id == str(group.group_owner or ""):
+            return True
+        return sender_id in {str(user_id) for user_id in group.group_admins or []}
 
     @staticmethod
     def _fingerprint(text: str) -> str:
@@ -270,11 +337,11 @@ class RepeaterPlugin(Star):
             return
 
         group_key = self._group_key(event)
-        if (
-            group_key not in self.group_states
-            and not self.default_enabled
-            and not self.interrupt_default_enabled
-        ):
+        state = self.group_states.get(group_key)
+        if not self._is_enabled(
+            group_key,
+            state,
+        ) and not self._is_interrupt_enabled(group_key, state):
             return
         async with self._lock_for(group_key):
             attempt = await self._process_message(
@@ -317,8 +384,8 @@ class RepeaterPlugin(Star):
     ) -> RepeatAttempt | None:
         async with self.save_lock:
             state = self._state_for(group_key)
-            repeat_enabled = self._is_enabled(state)
-            interrupt_enabled = self._is_interrupt_enabled(state)
+            repeat_enabled = self._is_enabled(group_key, state)
+            interrupt_enabled = self._is_interrupt_enabled(group_key, state)
             if not repeat_enabled and not interrupt_enabled:
                 return None
 
@@ -428,9 +495,7 @@ class RepeaterPlugin(Star):
                 previous_users = state.repeated_users
                 state.pending_fingerprints.discard(attempt.fingerprint)
                 state.repeated_fingerprints.add(attempt.fingerprint)
-                clears_current_sequence = (
-                    state.last_fingerprint == attempt.fingerprint
-                )
+                clears_current_sequence = state.last_fingerprint == attempt.fingerprint
                 if clears_current_sequence:
                     state.repeated_users = set()
                 try:
@@ -465,18 +530,21 @@ class RepeaterPlugin(Star):
             return "该指令仅在群聊中可用。"
 
         group_key = self._group_key(event)
+        if action in {"开启", "关闭"} and not await self._can_manage_group(event):
+            return PERMISSION_ERROR
+
         if action == "查看":
             lock = self.group_locks.get(group_key)
             if lock is None:
-                state = self.group_states.get(group_key)
-                enabled = self.default_enabled if state is None else self._is_enabled(state)
+                enabled = self._is_enabled(
+                    group_key,
+                    self.group_states.get(group_key),
+                )
             else:
                 async with lock:
-                    state = self.group_states.get(group_key)
-                    enabled = (
-                        self.default_enabled
-                        if state is None
-                        else self._is_enabled(state)
+                    enabled = self._is_enabled(
+                        group_key,
+                        self.group_states.get(group_key),
                     )
             status = "开启" if enabled else "关闭"
             return (
@@ -489,13 +557,18 @@ class RepeaterPlugin(Star):
             async with self._lock_for(group_key):
                 async with self.save_lock:
                     state = self._state_for(group_key)
-                    already_enabled = self._is_enabled(state)
+                    already_enabled = self._is_enabled(group_key, state)
+                    was_disabled = group_key in self.repeat_disabled_group_ids
                     previous_override = state.enabled_override
+                    self.repeat_disabled_group_ids.discard(group_key)
                     state.enabled_override = True
                     try:
-                        await self._save_locked()
+                        await self._save_group_settings_locked()
                     except (asyncio.CancelledError, Exception):
+                        if was_disabled:
+                            self.repeat_disabled_group_ids.add(group_key)
                         state.enabled_override = previous_override
+                        self._restore_plugin_config_after_failure()
                         raise
             return (
                 "本群自动复读已经是开启状态。"
@@ -507,19 +580,24 @@ class RepeaterPlugin(Star):
             async with self._lock_for(group_key):
                 async with self.save_lock:
                     state = self._state_for(group_key)
-                    already_disabled = not self._is_enabled(state)
+                    already_disabled = not self._is_enabled(group_key, state)
+                    was_disabled = group_key in self.repeat_disabled_group_ids
                     previous_override = state.enabled_override
                     previous_users = state.repeated_users
                     previous_fingerprint = state.last_fingerprint
-                    state.enabled_override = False
+                    self.repeat_disabled_group_ids.add(group_key)
+                    state.enabled_override = None
                     state.repeated_users = set()
                     state.last_fingerprint = ""
                     try:
-                        await self._save_locked()
+                        await self._save_group_settings_locked()
                     except (asyncio.CancelledError, Exception):
+                        if not was_disabled:
+                            self.repeat_disabled_group_ids.discard(group_key)
                         state.enabled_override = previous_override
                         state.repeated_users = previous_users
                         state.last_fingerprint = previous_fingerprint
+                        self._restore_plugin_config_after_failure()
                         raise
             return (
                 "本群自动复读已经是关闭状态。"
@@ -533,6 +611,7 @@ class RepeaterPlugin(Star):
                 "自动复读 查看 —— 查看本群是否开启该功能\n"
                 "自动复读 开启 —— 在本群开启该功能\n"
                 "自动复读 关闭 —— 在本群关闭该功能\n"
+                "开启/关闭仅限 AstrBot 管理员、群主或群管理员\n"
                 "自动复读 帮助 —— 查看命令帮助与用法"
             )
 
@@ -563,22 +642,21 @@ class RepeaterPlugin(Star):
             return "该指令仅在群聊中可用。"
 
         group_key = self._group_key(event)
+        if action in {"开启", "关闭"} and not await self._can_manage_group(event):
+            return PERMISSION_ERROR
+
         if action == "查看":
             lock = self.group_locks.get(group_key)
             if lock is None:
-                state = self.group_states.get(group_key)
-                enabled = (
-                    self.interrupt_default_enabled
-                    if state is None
-                    else self._is_interrupt_enabled(state)
+                enabled = self._is_interrupt_enabled(
+                    group_key,
+                    self.group_states.get(group_key),
                 )
             else:
                 async with lock:
-                    state = self.group_states.get(group_key)
-                    enabled = (
-                        self.interrupt_default_enabled
-                        if state is None
-                        else self._is_interrupt_enabled(state)
+                    enabled = self._is_interrupt_enabled(
+                        group_key,
+                        self.group_states.get(group_key),
                     )
             status = "开启" if enabled else "关闭"
             return (
@@ -591,13 +669,18 @@ class RepeaterPlugin(Star):
             async with self._lock_for(group_key):
                 async with self.save_lock:
                     state = self._state_for(group_key)
-                    already_enabled = self._is_interrupt_enabled(state)
+                    already_enabled = self._is_interrupt_enabled(group_key, state)
+                    was_disabled = group_key in self.interrupt_disabled_group_ids
                     previous_override = state.interrupt_enabled_override
+                    self.interrupt_disabled_group_ids.discard(group_key)
                     state.interrupt_enabled_override = True
                     try:
-                        await self._save_locked()
+                        await self._save_group_settings_locked()
                     except (asyncio.CancelledError, Exception):
+                        if was_disabled:
+                            self.interrupt_disabled_group_ids.add(group_key)
                         state.interrupt_enabled_override = previous_override
+                        self._restore_plugin_config_after_failure()
                         raise
             return (
                 "本群打断复读已经是开启状态。"
@@ -609,13 +692,21 @@ class RepeaterPlugin(Star):
             async with self._lock_for(group_key):
                 async with self.save_lock:
                     state = self._state_for(group_key)
-                    already_disabled = not self._is_interrupt_enabled(state)
+                    already_disabled = not self._is_interrupt_enabled(
+                        group_key,
+                        state,
+                    )
+                    was_disabled = group_key in self.interrupt_disabled_group_ids
                     previous_override = state.interrupt_enabled_override
-                    state.interrupt_enabled_override = False
+                    self.interrupt_disabled_group_ids.add(group_key)
+                    state.interrupt_enabled_override = None
                     try:
-                        await self._save_locked()
+                        await self._save_group_settings_locked()
                     except (asyncio.CancelledError, Exception):
+                        if not was_disabled:
+                            self.interrupt_disabled_group_ids.discard(group_key)
                         state.interrupt_enabled_override = previous_override
+                        self._restore_plugin_config_after_failure()
                         raise
             return (
                 "本群打断复读已经是关闭状态。"
@@ -629,6 +720,7 @@ class RepeaterPlugin(Star):
                 "打断复读 查看 —— 查看本群是否开启该功能\n"
                 "打断复读 开启 —— 在本群开启该功能\n"
                 "打断复读 关闭 —— 在本群关闭该功能\n"
+                "开启/关闭仅限 AstrBot 管理员、群主或群管理员\n"
                 "打断复读 帮助 —— 查看命令帮助与用法"
             )
 
