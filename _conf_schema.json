@@ -1,0 +1,17 @@
+{
+  "default_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "新群的默认复读开关（群未单独设置时生效）"
+  },
+  "repeat_threshold": {
+    "type": "int",
+    "default": 3,
+    "description": "触发复读所需的独立用户数（含原始发送者，必须 >= 2）"
+  },
+  "repeat_probability": {
+    "type": "float",
+    "default": 0.3,
+    "description": "达到阈值后触发复读的概率，范围 0.0-1.0"
+  }
+}

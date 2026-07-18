@@ -1,14 +1,30 @@
-# astrbot-plugin-helloworld
+# AstrBot 自动复读插件
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+为 AstrBot 群聊提供按群独立的自动复读功能。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+## 功能
 
-# Supports
+- 每个群独立开启或关闭，默认状态由配置决定。
+- 仅统计连续发送相同文本的不同用户；同一用户重复发送只计一次。
+- 达到人数阈值后按配置概率触发复读。
+- 触发时先持久化待发送指纹，再执行发送：明确的发送失败会回滚并允许重试；进程中断等结果不确定的发送会继续抑制，以避免重复发送。
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+## 指令
+
+- `自动复读 查看`：查看本群状态、触发阈值和概率。
+- `自动复读 开启`：开启本群自动复读。
+- `自动复读 关闭`：关闭本群自动复读。
+- `自动复读 帮助`：显示帮助。
+- `repeatMsg`：`自动复读` 的英文别名。
+
+指令受 AstrBot 的唤醒前缀规则约束，例如默认使用 `/自动复读 查看`。
+
+## 配置
+
+插件首次加载后，AstrBot 根据 `_conf_schema.json` 生成配置文件：
+
+- `default_enabled`：未单独设置过的群是否默认开启，默认 `true`。
+- `repeat_threshold`：触发所需独立用户数（含首位发送者），默认 `3`，最小 `2`。
+- `repeat_probability`：达到阈值后每次尝试的触发概率，默认 `0.3`，范围 `0.0`–`1.0`。
+
+修改配置后重新加载插件或重启 AstrBot。
