@@ -2,6 +2,10 @@ import asyncio
 import copy
 import json
 import unittest
+import os
+import subprocess
+import sys
+import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,7 +13,17 @@ from pathlib import Path
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Face, Image, Plain
 
-from main import DEFAULT_INTERRUPT_TEXT, PERMISSION_ERROR, RepeaterPlugin
+from main import PERMISSION_ERROR, RepeaterPlugin
+from repeater_messages import (
+    RepeatableMessage,
+    fingerprint as make_fingerprint,
+    repeatable_message,
+)
+from repeater_service import (
+    DEFAULT_INTERRUPT_TEXT,
+    RepeaterSettings,
+    RepeaterStateService,
+)
 
 class ConfigSchemaTest(unittest.TestCase):
     def test_slider_fields_use_expected_ranges(self) -> None:
@@ -27,6 +41,41 @@ class ConfigSchemaTest(unittest.TestCase):
                 self.assertEqual(field["type"], field_type)
                 self.assertEqual(field["slider"], slider)
 
+
+class ImportPathTest(unittest.TestCase):
+    def test_main_imports_directly_and_as_plugin_package(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary_root:
+            plugin_parent = Path(temporary_root) / "data" / "plugins"
+            plugin_parent.mkdir(parents=True)
+            os.symlink(
+                project_root,
+                plugin_parent / "astrbot_plugin_repeater",
+                target_is_directory=True,
+            )
+
+            direct_import = subprocess.run(
+                [sys.executable, "-c", "import main"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(direct_import.returncode, 0, direct_import.stderr)
+
+            package_import = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import importlib; "
+                    "importlib.import_module("
+                    "'data.plugins.astrbot_plugin_repeater.main'"
+                    ")",
+                ],
+                cwd=temporary_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(package_import.returncode, 0, package_import.stderr)
 
 class FakeEvent:
     def __init__(
@@ -107,6 +156,39 @@ class FakeEvent:
 
     def stop_event(self) -> None:
         self.stopped = True
+
+class MessageBoundaryTest(unittest.TestCase):
+    def test_raw_mface_message_normalizes_to_replayable_chain(self) -> None:
+        self.assertIsNotNone(repeatable_message)
+        event = FakeEvent(
+            "message-boundary",
+            "A",
+            "前缀",
+            "1",
+            chain=[Plain("前缀")],
+            raw_message={
+                "message": [
+                    {"type": "text", "data": {"text": "前缀"}},
+                    {
+                        "type": "mface",
+                        "data": {
+                            "emoji_package_id": "package",
+                            "emoji_id": "same",
+                        },
+                    },
+                ],
+            },
+        )
+
+        message = repeatable_message(event)
+
+        self.assertIsNotNone(message)
+        self.assertEqual(message.summary, "前缀")
+        self.assertEqual(
+            [segment.toDict()["type"] for segment in message.chain],
+            ["text", "mface"],
+        )
+        self.assertEqual(message.chain[1].toDict()["data"]["emoji_id"], "same")
 
 
 class DelayedEvent(FakeEvent):
@@ -208,6 +290,51 @@ class SequencedMemoryRepeater(MemoryRepeater):
         await super().put_kv_data(key, value)
 
 
+class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
+    async def test_threshold_attempt_is_persisted_before_delivery(self) -> None:
+        self.assertIsNotNone(RepeaterSettings)
+        self.assertIsNotNone(RepeaterStateService)
+        self.assertIsNotNone(RepeatableMessage)
+        store: dict = {}
+
+        async def load_states():
+            return copy.deepcopy(store.get("group_states", {}))
+
+        async def save_states(states):
+            store["group_states"] = copy.deepcopy(states)
+
+        settings = RepeaterSettings(
+            config={},
+            repeat_disabled_group_ids=set(),
+            interrupt_disabled_group_ids=set(),
+            repeat_threshold=2,
+            repeat_probability=1.0,
+            default_enabled=True,
+            interrupt_probability=0.0,
+            interrupt_texts=("打断！",),
+            interrupt_default_enabled=False,
+        )
+        service = RepeaterStateService(settings, load_states, save_states)
+        await service.initialize()
+        message = RepeatableMessage(
+            fingerprint="message-fingerprint",
+            text="内容",
+            chain=(),
+            summary="内容",
+        )
+
+        self.assertIsNone(
+            await service.process_message("group", "A", "1", message),
+        )
+        attempt = await service.process_message("group", "B", "2", message)
+
+        self.assertIsNotNone(attempt)
+        self.assertEqual(attempt.response_text, "内容")
+        self.assertIn(
+            "message-fingerprint",
+            store["group_states"]["group"]["pending_fingerprints"],
+        )
+
 async def run_command(
     plugin: RepeaterPlugin,
     event: FakeEvent,
@@ -226,18 +353,18 @@ async def run_interrupt_command(
 
 class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     def test_default_repeat_probability_is_thirty_percent(self) -> None:
-        self.assertEqual(RepeaterPlugin(None, {}).repeat_probability, 0.3)
+        self.assertEqual(RepeaterPlugin(None, {}).state_service.settings.repeat_probability, 0.3)
         self.assertEqual(
-            RepeaterPlugin(None, {"repeat_probability": "invalid"}).repeat_probability,
+            RepeaterPlugin(None, {"repeat_probability": "invalid"}).state_service.settings.repeat_probability,
             0.3,
         )
 
     def test_interrupt_config_defaults_and_invalid_values(self) -> None:
         plugin = RepeaterPlugin(None, {})
-        self.assertTrue(plugin.interrupt_default_enabled)
-        self.assertEqual(plugin.interrupt_probability, 0.1)
-        self.assertEqual(plugin.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
-        self.assertEqual(len(plugin.interrupt_texts), 1)
+        self.assertTrue(plugin.state_service.settings.interrupt_default_enabled)
+        self.assertEqual(plugin.state_service.settings.interrupt_probability, 0.1)
+        self.assertEqual(plugin.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertEqual(len(plugin.state_service.settings.interrupt_texts), 1)
 
         invalid = RepeaterPlugin(
             None,
@@ -247,18 +374,18 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 "interrupt_texts": ["", 1, "   "],
             },
         )
-        self.assertTrue(invalid.interrupt_default_enabled)
-        self.assertEqual(invalid.interrupt_probability, 0.1)
-        self.assertEqual(invalid.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertTrue(invalid.state_service.settings.interrupt_default_enabled)
+        self.assertEqual(invalid.state_service.settings.interrupt_probability, 0.1)
+        self.assertEqual(invalid.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
 
         empty = RepeaterPlugin(None, {"interrupt_texts": []})
-        self.assertEqual(empty.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertEqual(empty.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
 
         custom = RepeaterPlugin(
             None,
             {"interrupt_texts": [" 第一条 ", "", 2, "第二条"]},
         )
-        self.assertEqual(custom.interrupt_texts, ("第一条", "第二条"))
+        self.assertEqual(custom.state_service.settings.interrupt_texts, ("第一条", "第二条"))
 
     async def test_distinct_users_and_permanent_repeat_suppression(self) -> None:
         store: dict = {}
@@ -358,7 +485,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first.sent)
         self.assertFalse(second.sent)
-        self.assertEqual(plugin.group_states["different-media"].repeated_users, {"B"})
+        self.assertEqual(plugin.state_service.group_states["different-media"].repeated_users, {"B"})
 
     async def test_onebot_mface_uses_raw_identity_and_replays_in_order(self) -> None:
         plugin = MemoryRepeater({}, {"repeat_threshold": 2})
@@ -457,8 +584,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         second = FakeEvent("interrupt", "B", "原始复读内容", "2")
 
         with (
-            patch("main.random.random", return_value=0.0),
-            patch("main.random.choice", return_value="打断乙") as choice_mock,
+            patch("repeater_service.random.random", return_value=0.0),
+            patch("repeater_service.random.choice", return_value="打断乙") as choice_mock,
         ):
             await plugin.on_group_message(first)
             await plugin.on_group_message(second)
@@ -468,8 +595,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second.stopped)
         choice_mock.assert_called_once_with(("打断甲", "打断乙", "打断丙"))
         self.assertIn(
-            plugin._fingerprint("原始复读内容"),
-            plugin.group_states["interrupt"].repeated_fingerprints,
+            make_fingerprint("原始复读内容"),
+            plugin.state_service.group_states["interrupt"].repeated_fingerprints,
         )
 
     async def test_interrupt_miss_falls_through_to_normal_repeat(self) -> None:
@@ -489,8 +616,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         second = FakeEvent("fallthrough", "B", "继续复读", "2")
 
         with (
-            patch("main.random.random", side_effect=[0.9, 0.0]) as random_mock,
-            patch("main.random.choice") as choice_mock,
+            patch("repeater_service.random.random", side_effect=[0.9, 0.0]) as random_mock,
+            patch("repeater_service.random.choice") as choice_mock,
         ):
             await plugin.on_group_message(first)
             await plugin.on_group_message(second)
@@ -511,14 +638,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "put failed"):
             await plugin.on_group_message(event)
 
-        state = plugin.group_states["new-sequence"]
+        state = plugin.state_service.group_states["new-sequence"]
         self.assertEqual(state.last_fingerprint, "")
         self.assertEqual(state.repeated_users, set())
         self.assertEqual(state.last_message_id, "")
         self.assertNotIn("group_states", store)
 
         await plugin.on_group_message(event)
-        fingerprint = plugin._fingerprint("首条消息")
+        fingerprint = make_fingerprint("首条消息")
         self.assertEqual(state.last_fingerprint, fingerprint)
         self.assertEqual(state.repeated_users, {"A"})
         self.assertEqual(state.last_message_id, "1")
@@ -544,8 +671,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "put failed"):
             await plugin.on_group_message(triggering_event)
 
-        state = plugin.group_states["precommit"]
-        fingerprint = plugin._fingerprint("保存失败")
+        state = plugin.state_service.group_states["precommit"]
+        fingerprint = make_fingerprint("保存失败")
         self.assertFalse(triggering_event.sent)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
@@ -577,8 +704,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "send failed"):
             await plugin.on_group_message(failing_event)
 
-        state = plugin.group_states["retry"]
-        fingerprint = plugin._fingerprint("重试")
+        state = plugin.state_service.group_states["retry"]
+        fingerprint = make_fingerprint("重试")
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
         self.assertEqual(state.last_message_id, "1")
@@ -612,8 +739,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "send failed"):
             await plugin.on_group_message(failing_event)
 
-        fingerprint = plugin._fingerprint("保守回滚")
-        state = plugin.group_states["rollback"]
+        fingerprint = make_fingerprint("保守回滚")
+        state = plugin.state_service.group_states["rollback"]
         self.assertIn(fingerprint, state.pending_fingerprints)
         self.assertIn(
             fingerprint,
@@ -649,8 +776,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, "put failed"):
             await plugin.on_group_message(triggering_event)
 
-        fingerprint = plugin._fingerprint("保守提交")
-        state = plugin.group_states["commit"]
+        fingerprint = make_fingerprint("保守提交")
+        state = plugin.state_service.group_states["commit"]
         self.assertEqual(triggering_event.sent, ["保守提交"])
         self.assertIn(fingerprint, state.pending_fingerprints)
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
@@ -683,8 +810,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         triggering_event.release_send.set()
         await send_task
 
-        state = plugin.group_states["race"]
-        self.assertEqual(state.last_fingerprint, plugin._fingerprint("内容 B"))
+        state = plugin.state_service.group_states["race"]
+        self.assertEqual(state.last_fingerprint, make_fingerprint("内容 B"))
         self.assertEqual(state.repeated_users, {"C"})
 
     async def test_group_override_and_default_are_independent(self) -> None:
@@ -697,11 +824,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "关闭",
         )
         self.assertEqual(close_reply, ["已在本群关闭自动复读。"])
-        self.assertFalse(plugin._is_enabled("group-a", plugin._state_for("group-a")))
-        self.assertTrue(plugin._is_enabled("group-b", plugin._state_for("group-b")))
+        self.assertFalse(plugin.state_service.is_repeat_enabled("group-a", plugin.state_service.state_for("group-a")))
+        self.assertTrue(plugin.state_service.is_repeat_enabled("group-b", plugin.state_service.state_for("group-b")))
 
-        plugin.default_enabled = False
-        self.assertFalse(plugin._is_enabled("group-b", plugin._state_for("group-b")))
+        plugin.state_service.settings.default_enabled = False
+        self.assertFalse(plugin.state_service.is_repeat_enabled("group-b", plugin.state_service.state_for("group-b")))
 
         open_reply = await run_command(
             plugin,
@@ -709,7 +836,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "开启",
         )
         self.assertEqual(open_reply, ["已在本群开启自动复读。"])
-        self.assertTrue(plugin._is_enabled("group-a", plugin._state_for("group-a")))
+        self.assertTrue(plugin.state_service.is_repeat_enabled("group-a", plugin.state_service.state_for("group-a")))
 
     async def test_interrupt_command_has_independent_persisted_state(self) -> None:
         store: dict = {}
@@ -720,31 +847,27 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         status_reply = await run_interrupt_command(plugin, event, "查看")
         open_reply = await run_interrupt_command(plugin, event, "开启")
 
-        state = plugin.group_states["interrupt-command"]
+        state = plugin.state_service.group_states["interrupt-command"]
         self.assertEqual(status_reply[0].splitlines()[0], "本群打断复读：关闭")
         self.assertEqual(open_reply, ["已在本群开启打断复读。"])
-        self.assertTrue(plugin._is_interrupt_enabled("interrupt-command", state))
-        self.assertTrue(plugin._is_enabled("interrupt-command", state))
+        self.assertTrue(plugin.state_service.is_interrupt_enabled("interrupt-command", state))
+        self.assertTrue(plugin.state_service.is_repeat_enabled("interrupt-command", state))
         self.assertTrue(
             store["group_states"]["interrupt-command"]["interrupt_enabled_override"]
         )
 
         reloaded = MemoryRepeater(store)
         await reloaded.initialize()
-        reloaded_state = reloaded.group_states["interrupt-command"]
+        reloaded_state = reloaded.state_service.group_states["interrupt-command"]
         self.assertTrue(
-            reloaded._is_interrupt_enabled(
-                "interrupt-command",
-                reloaded_state,
-            )
+            reloaded.state_service.is_interrupt_enabled("interrupt-command",
+            reloaded_state,)
         )
         close_reply = await run_interrupt_command(reloaded, event, "关闭")
         self.assertEqual(close_reply, ["已在本群关闭打断复读。"])
         self.assertFalse(
-            reloaded._is_interrupt_enabled(
-                "interrupt-command",
-                reloaded_state,
-            )
+            reloaded.state_service.is_interrupt_enabled("interrupt-command",
+            reloaded_state,)
         )
 
         help_reply = await run_interrupt_command(reloaded, event, "帮助")
@@ -833,8 +956,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater({}, config)
         await plugin.initialize()
 
-        self.assertFalse(plugin._is_enabled("configured", None))
-        self.assertFalse(plugin._is_interrupt_enabled("configured", None))
+        self.assertFalse(plugin.state_service.is_repeat_enabled("configured", None))
+        self.assertFalse(plugin.state_service.is_interrupt_enabled("configured", None))
         self.assertEqual(config.save_count, 0)
         self.assertEqual(config["repeat_disabled_group_ids"], ["configured"])
         self.assertEqual(config["interrupt_disabled_group_ids"], ["configured"])
@@ -852,8 +975,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 "关闭",
             )
 
-        state = plugin.group_states["config-failure"]
-        self.assertTrue(plugin._is_enabled("config-failure", state))
+        state = plugin.state_service.group_states["config-failure"]
+        self.assertTrue(plugin.state_service.is_repeat_enabled("config-failure", state))
         self.assertEqual(config["repeat_disabled_group_ids"], [])
 
     async def test_command_save_failure_restores_group_state(self) -> None:
@@ -871,9 +994,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 "关闭",
             )
 
-        state = plugin.group_states["command"]
-        self.assertTrue(plugin._is_enabled("command", state))
-        self.assertEqual(state.last_fingerprint, plugin._fingerprint("已有序列"))
+        state = plugin.state_service.group_states["command"]
+        self.assertTrue(plugin.state_service.is_repeat_enabled("command", state))
+        self.assertEqual(state.last_fingerprint, make_fingerprint("已有序列"))
         self.assertEqual(state.repeated_users, {"A"})
         self.assertEqual(store["group_states"]["command"], saved_before)
 
@@ -897,8 +1020,36 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(FakeEvent("disabled", "A", "忽略", "2"))
 
         self.assertEqual(reply[0].splitlines()[0], "本群自动复读：关闭")
-        self.assertNotIn("disabled", plugin.group_states)
-        self.assertNotIn("disabled", plugin.group_locks)
+        self.assertNotIn("disabled", plugin.state_service.group_states)
+        self.assertNotIn("disabled", plugin.state_service.group_locks)
+        self.assertEqual(store, {})
+    async def test_disabled_group_skips_unparseable_message_chain(self) -> None:
+        class ExplodingComponent:
+            def toDict(self) -> dict:
+                raise RuntimeError("disabled group must not parse messages")
+
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "default_enabled": False,
+                "interrupt_default_enabled": False,
+            },
+        )
+        await plugin.initialize()
+        event = FakeEvent(
+            "disabled-unparseable",
+            "A",
+            "",
+            "1",
+            chain=[ExplodingComponent()],
+        )
+
+        await plugin.on_group_message(event)
+
+        self.assertFalse(event.sent)
+        self.assertNotIn("disabled-unparseable", plugin.state_service.group_states)
+        self.assertNotIn("disabled-unparseable", plugin.state_service.group_locks)
         self.assertEqual(store, {})
 
     async def test_terminate_waits_for_active_send_and_blocks_new_events(self) -> None:
@@ -922,14 +1073,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(terminate_task.done())
         ignored_event = FakeEvent("new-group", "C", "不会处理", "3")
         await plugin.on_group_message(ignored_event)
-        self.assertNotIn("new-group", plugin.group_states)
+        self.assertNotIn("new-group", plugin.state_service.group_states)
 
         triggering_event.release_send.set()
         await asyncio.gather(send_task, terminate_task)
         self.assertFalse(plugin.active_handler_tasks)
         self.assertIn(
-            plugin._fingerprint("热重载"),
-            plugin.group_states["reload"].repeated_fingerprints,
+            make_fingerprint("热重载"),
+            plugin.state_service.group_states["reload"].repeated_fingerprints,
         )
 
     async def test_concurrent_group_saves_keep_both_updates(self) -> None:
@@ -937,8 +1088,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(store, put_delay=0.01)
 
         async def update(group_key: str, fingerprint: str) -> None:
-            plugin._state_for(group_key).last_fingerprint = fingerprint
-            await plugin._save()
+            plugin.state_service.state_for(group_key).last_fingerprint = fingerprint
+            await plugin.state_service.save()
 
         await asyncio.gather(
             update("group-a", "A"),
@@ -979,7 +1130,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("first", saved)
         self.assertIn("second", saved)
         self.assertNotIn("failed", saved)
-        failed_state = plugin.group_states["failed"]
+        failed_state = plugin.state_service.group_states["failed"]
         self.assertEqual(failed_state.last_fingerprint, "")
         self.assertEqual(failed_state.repeated_users, set())
         self.assertEqual(failed_state.last_message_id, "")
