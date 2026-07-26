@@ -158,9 +158,7 @@ def segment_identity(
             }
         else:
             identity = {
-                "id": str(
-                    data.get("key") or data.get("file") or data.get("url") or ""
-                ),
+                "id": str(data.get("key") or data.get("file") or data.get("url") or ""),
             }
         return {"type": "mface", **identity}
     return {

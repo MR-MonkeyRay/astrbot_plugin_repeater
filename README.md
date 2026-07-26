@@ -40,7 +40,15 @@
 - `interrupt_disabled_group_ids`：关闭打断复读的 QQ 群号列表，由开关指令自动更新。
 - `interrupt_probability`：达到阈值后优先打断的概率，默认 `0.1`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
 - `interrupt_texts`：命中打断时随机选择的文本列表；为空时使用默认文本 `打断！`。
+- `interrupt_mute_enabled`：是否启用打断复读禁言，默认 `false`。
+- `interrupt_mute_disabled_group_ids`：关闭打断复读禁言的 QQ 群号列表。
+- `interrupt_mute_duration_min`：禁言时长下限（秒），默认 `1`；配置页提供范围 `1`–`3600` 秒、步长 `1` 秒的滑块。
+- `interrupt_mute_duration_max`：禁言时长上限（秒），默认 `15`；配置页提供范围 `1`–`3600` 秒、步长 `1` 秒的滑块。
+- `interrupt_mute_probability`：打断复读后触发禁言的概率，默认 `0.05`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
+- `interrupt_mute_texts`：触发禁言时随机选择的提示文本；支持 `{user}`（被禁言用户）和 `{time}`（禁言秒数）占位符；为空时使用默认文本。
 
 打断与普通复读互斥：命中打断后本次只发送打断文本；未命中打断时，才按 `repeat_probability` 尝试普通复读。
+
+启用禁言后，插件会在打断复读后按 `interrupt_mute_probability` 尝试禁言，禁言时长在 `interrupt_mute_duration_min` 与 `interrupt_mute_duration_max` 之间随机选择。禁言操作仅在机器人是该群群主或管理员时可执行；缺少该权限时不会执行禁言。
 
 修改配置后重新加载插件或重启 AstrBot。

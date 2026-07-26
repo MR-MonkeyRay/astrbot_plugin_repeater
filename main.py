@@ -12,11 +12,13 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 if __package__:
+    from .repeater_config import build_settings
     from .repeater_messages import repeatable_message
-    from .repeater_service import RepeatAttempt, RepeaterStateService, build_settings
+    from .repeater_service import RepeatAttempt, RepeaterStateService
 else:
+    from repeater_config import build_settings
     from repeater_messages import repeatable_message
-    from repeater_service import RepeatAttempt, RepeaterStateService, build_settings
+    from repeater_service import RepeatAttempt, RepeaterStateService
 
 
 PERMISSION_ERROR = (
@@ -173,11 +175,7 @@ class RepeaterPlugin(Star):
             return
 
         group_key = self._group_key(event)
-        state = self.state_service.group_states.get(group_key)
-        if not self.state_service.is_repeat_enabled(
-            group_key,
-            state,
-        ) and not self.state_service.is_interrupt_enabled(group_key, state):
+        if not await self.state_service.is_any_repeat_mode_enabled(group_key):
             return
 
         message = repeatable_message(event)
@@ -366,7 +364,6 @@ class RepeaterPlugin(Star):
 
         settings = self.state_service.settings
         noun = "打断复读" if interrupt else "自动复读"
-        command = "打断复读" if interrupt else "自动复读"
         if action == "查看":
             enabled = (
                 await self.state_service.interrupt_enabled_for(group_key)
@@ -415,14 +412,14 @@ class RepeaterPlugin(Star):
         if action == "帮助":
             return (
                 "指令用法：\n"
-                f"{command} 查看 —— 查看本群是否开启该功能\n"
-                f"{command} 开启 —— 在本群开启该功能\n"
-                f"{command} 关闭 —— 在本群关闭该功能\n"
+                f"{noun} 查看 —— 查看本群是否开启该功能\n"
+                f"{noun} 开启 —— 在本群开启该功能\n"
+                f"{noun} 关闭 —— 在本群关闭该功能\n"
                 "开启/关闭仅限 AstrBot 管理员、群主或群管理员\n"
-                f"{command} 帮助 —— 查看命令帮助与用法"
+                f"{noun} 帮助 —— 查看命令帮助与用法"
             )
 
-        return f"未知子命令：{action}\n发送「{command} 帮助」查看用法。"
+        return f"未知子命令：{action}\n发送「{noun} 帮助」查看用法。"
 
     async def terminate(self) -> None:
         """阻止新处理器，等待活动任务后持久化最终状态。"""
