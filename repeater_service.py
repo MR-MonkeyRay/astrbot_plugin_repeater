@@ -17,6 +17,7 @@ else:
 
 
 DEFAULT_INTERRUPT_TEXT = "打断！"
+DEFAULT_INTERRUPT_MUTE_TEXT = "用户{user}因命中打断复读禁言策略而被禁言{time}s"
 
 
 @dataclass(slots=True)
@@ -116,6 +117,7 @@ class RepeatAttempt:
         fingerprint: 要提交或回滚的消息指纹。
         message_id: 触发尝试的消息 ID。
         previous_message_id: 处理该消息前记录的消息 ID。
+        sender_id: 触发复读或打断的用户 ID。
         response_text: 要发送的纯文本或消息摘要。
         response_chain: 普通复读时要原样回发的消息链。
         interrupted: 该尝试是否为打断复读。
@@ -124,6 +126,7 @@ class RepeatAttempt:
     fingerprint: str
     message_id: str
     previous_message_id: str
+    sender_id: str
     response_text: str
     response_chain: tuple[Any, ...]
     interrupted: bool
@@ -137,23 +140,35 @@ class RepeaterSettings:
         config: 可写回插件配置的原始配置对象。
         repeat_disabled_group_ids: 被配置显式关闭普通复读的群 ID。
         interrupt_disabled_group_ids: 被配置显式关闭打断复读的群 ID。
+        interrupt_mute_disabled_group_ids: 被配置显式关闭打断复读禁言的群 ID。
         repeat_threshold: 触发复读所需的独立发送者数量。
         repeat_probability: 达到阈值后普通复读的触发概率。
         default_enabled: 普通复读的默认开关。
         interrupt_probability: 达到阈值后优先打断的触发概率。
         interrupt_texts: 打断命中时可随机选择的文本。
         interrupt_default_enabled: 打断复读的默认开关。
+        interrupt_mute_enabled: 打断复读禁言的全局开关。
+        interrupt_mute_duration_min: 打断复读禁言时长的下限（秒）。
+        interrupt_mute_duration_max: 打断复读禁言时长的上限（秒）。
+        interrupt_mute_probability: 打断复读禁言的触发概率。
+        interrupt_mute_texts: 打断复读禁言时可随机选择的提示文本。
     """
 
     config: dict[str, Any]
     repeat_disabled_group_ids: set[str]
     interrupt_disabled_group_ids: set[str]
+    interrupt_mute_disabled_group_ids: set[str]
     repeat_threshold: int
     repeat_probability: float
     default_enabled: bool
     interrupt_probability: float
     interrupt_texts: tuple[str, ...]
     interrupt_default_enabled: bool
+    interrupt_mute_enabled: bool
+    interrupt_mute_duration_min: int
+    interrupt_mute_duration_max: int
+    interrupt_mute_probability: float
+    interrupt_mute_texts: tuple[str, ...]
 
     def save_config(self) -> None:
         """将禁用群列表写回配置，并触发配置对象的保存钩子。"""
@@ -162,6 +177,9 @@ class RepeaterSettings:
         )
         self.config["interrupt_disabled_group_ids"] = sorted(
             self.interrupt_disabled_group_ids,
+        )
+        self.config["interrupt_mute_disabled_group_ids"] = sorted(
+            self.interrupt_mute_disabled_group_ids,
         )
         save_config = getattr(self.config, "save_config", None)
         if callable(save_config):
@@ -186,6 +204,11 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
     interrupt_disabled_group_ids = _load_group_ids(
         config.get("interrupt_disabled_group_ids", []),
         "interrupt_disabled_group_ids",
+        logger,
+    )
+    interrupt_mute_disabled_group_ids = _load_group_ids(
+        config.get("interrupt_mute_disabled_group_ids", []),
+        "interrupt_mute_disabled_group_ids",
         logger,
     )
 
@@ -254,16 +277,90 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         )
         interrupt_default_enabled = True
 
+    interrupt_mute_enabled = config.get("interrupt_mute_enabled", False)
+    if not isinstance(interrupt_mute_enabled, bool):
+        logger.warning(
+            "[repeater] interrupt_mute_enabled "
+            f"非法({interrupt_mute_enabled})，回退为 False",
+        )
+        interrupt_mute_enabled = False
+
+    interrupt_mute_duration_min = config.get("interrupt_mute_duration_min", 1)
+    if (
+        not isinstance(interrupt_mute_duration_min, int)
+        or isinstance(interrupt_mute_duration_min, bool)
+        or not 1 <= interrupt_mute_duration_min <= 3600
+    ):
+        logger.warning(
+            "[repeater] interrupt_mute_duration_min "
+            f"非法({interrupt_mute_duration_min})，回退为 1",
+        )
+        interrupt_mute_duration_min = 1
+
+    interrupt_mute_duration_max = config.get("interrupt_mute_duration_max", 15)
+    if (
+        not isinstance(interrupt_mute_duration_max, int)
+        or isinstance(interrupt_mute_duration_max, bool)
+        or not 1 <= interrupt_mute_duration_max <= 3600
+    ):
+        logger.warning(
+            "[repeater] interrupt_mute_duration_max "
+            f"非法({interrupt_mute_duration_max})，回退为 15",
+        )
+        interrupt_mute_duration_max = 15
+    if interrupt_mute_duration_max < interrupt_mute_duration_min:
+        logger.warning(
+            "[repeater] interrupt_mute_duration_max 小于 "
+            "interrupt_mute_duration_min，使用下限值",
+        )
+        interrupt_mute_duration_max = interrupt_mute_duration_min
+
+    interrupt_mute_probability = config.get("interrupt_mute_probability", 0.05)
+    if (
+        not isinstance(interrupt_mute_probability, (int, float))
+        or isinstance(interrupt_mute_probability, bool)
+        or not 0.0 <= interrupt_mute_probability <= 1.0
+    ):
+        logger.warning(
+            "[repeater] interrupt_mute_probability "
+            f"非法({interrupt_mute_probability})，回退为 0.05",
+        )
+        interrupt_mute_probability = 0.05
+
+    raw_interrupt_mute_texts = config.get(
+        "interrupt_mute_texts",
+        (DEFAULT_INTERRUPT_MUTE_TEXT,),
+    )
+    if isinstance(raw_interrupt_mute_texts, (list, tuple)):
+        interrupt_mute_texts = tuple(
+            item.strip()
+            for item in raw_interrupt_mute_texts
+            if isinstance(item, str) and item.strip()
+        )
+    else:
+        interrupt_mute_texts = ()
+    if not interrupt_mute_texts:
+        logger.warning(
+            "[repeater] interrupt_mute_texts 非法或为空，回退为默认禁言文本",
+        )
+        interrupt_mute_texts = (DEFAULT_INTERRUPT_MUTE_TEXT,)
+
     return RepeaterSettings(
         config=config,
         repeat_disabled_group_ids=repeat_disabled_group_ids,
         interrupt_disabled_group_ids=interrupt_disabled_group_ids,
+        interrupt_mute_disabled_group_ids=interrupt_mute_disabled_group_ids,
         repeat_threshold=threshold,
         repeat_probability=float(probability),
         default_enabled=default_enabled,
         interrupt_probability=float(interrupt_probability),
         interrupt_texts=interrupt_texts,
         interrupt_default_enabled=interrupt_default_enabled,
+        interrupt_mute_enabled=interrupt_mute_enabled,
+        interrupt_mute_duration_min=interrupt_mute_duration_min,
+        interrupt_mute_duration_max=interrupt_mute_duration_max,
+        interrupt_mute_probability=float(interrupt_mute_probability),
+        interrupt_mute_texts=interrupt_mute_texts,
     )
 
 
@@ -414,6 +511,19 @@ class RepeaterStateService:
         if state is None or state.interrupt_enabled_override is None:
             return self.settings.interrupt_default_enabled
         return state.interrupt_enabled_override
+
+    def is_interrupt_mute_enabled(self, group_id: str) -> bool:
+        """计算打断复读禁言在指定群的有效开关。
+
+        Args:
+            group_id: 要检查的群 ID。
+
+        Returns:
+            全局开关启用且群未被显式禁用时为 True。
+        """
+        if not self.settings.interrupt_mute_enabled:
+            return False
+        return group_id not in self.settings.interrupt_mute_disabled_group_ids
 
     async def repeat_enabled_for(self, group_key: str) -> bool:
         """在群锁保护下读取普通复读的有效开关。
@@ -612,6 +722,7 @@ class RepeaterStateService:
                         fingerprint=fingerprint,
                         message_id=message_id,
                         previous_message_id=previous_message_id,
+                        sender_id=sender_id,
                         response_text=response_text,
                         response_chain=response_chain,
                         interrupted=interrupted,

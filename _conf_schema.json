@@ -47,5 +47,44 @@
       "同一句再来一遍就要收费啦，先欠我一颗糖！"
     ],
     "description": "打断复读时随机发送的文本；为空时使用“打断！”"
+  },
+  "interrupt_mute_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "是否启用打断复读禁言功能"
+  },
+  "interrupt_mute_disabled_group_ids": {
+    "type": "list",
+    "default": [],
+    "description": "关闭打断复读禁言功能的 QQ 群号"
+  },
+  "interrupt_mute_duration_min": {
+    "type": "int",
+    "default": 1,
+    "slider": {"min": 1, "max": 3600, "step": 1},
+    "description": "禁言时间区间下限（秒）"
+  },
+  "interrupt_mute_duration_max": {
+    "type": "int",
+    "default": 15,
+    "slider": {"min": 1, "max": 3600, "step": 1},
+    "description": "禁言时间区间上限（秒）"
+  },
+  "interrupt_mute_probability": {
+    "type": "float",
+    "default": 0.05,
+    "slider": {"min": 0, "max": 1, "step": 0.01},
+    "description": "打断复读后触发禁言的概率（0%–100%）"
+  },
+  "interrupt_mute_texts": {
+    "type": "list",
+    "default": [
+      "你以为你打断了复读？错！你已经被打断了人生 {time} 秒 🤐",
+      "打断复读？不好意思，你也被打断发言权了，{time}秒后见 😏",
+      "恭喜 {user} 同学成功触发【打断复读禁言】成就，奖励禁言 {time} 秒 🎉",
+      "复读虽可恶，打断更该罚！{user} 请安静 {time} 秒反思一下 🤔",
+      "检测到反复读行为，根据群规第114514条，{user} 将被禁言 {time} 秒 ⚖️"
+    ],
+    "description": "打断复读禁言时随机发送的文本；支持 {user} 和 {time} 占位符；为空时使用默认文本"
   }
 }
