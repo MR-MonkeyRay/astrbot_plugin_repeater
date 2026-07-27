@@ -5,17 +5,20 @@
 """
 
 import asyncio
+import random
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
 if __package__:
+    from .repeater_config import build_settings
     from .repeater_messages import repeatable_message
-    from .repeater_service import RepeaterStateService, build_settings
+    from .repeater_service import RepeatAttempt, RepeaterStateService
 else:
+    from repeater_config import build_settings
     from repeater_messages import repeatable_message
-    from repeater_service import RepeaterStateService, build_settings
+    from repeater_service import RepeatAttempt, RepeaterStateService
 
 
 PERMISSION_ERROR = (
@@ -94,6 +97,28 @@ class RepeaterPlugin(Star):
             return True
         return sender_id in {str(user_id) for user_id in group.group_admins or []}
 
+    @staticmethod
+    async def _is_bot_admin(event: AstrMessageEvent) -> bool:
+        """判断 bot 是否在本群具有管理员权限。
+
+        Args:
+            event: 群消息事件。
+
+        Returns:
+            bot 为群主或群管理员时为 True。
+        """
+        try:
+            group = await event.get_group()
+        except Exception as exc:
+            logger.warning(f"[repeater] 获取群信息失败: {exc}")
+            return False
+        if group is None:
+            return False
+        bot_id = str(event.get_self_id())
+        if bot_id == str(group.group_owner or ""):
+            return True
+        return bot_id in {str(user_id) for user_id in group.group_admins or []}
+
     def _begin_handler(self) -> asyncio.Task | None:
         """登记当前处理协程，或在终止期间拒绝它。
 
@@ -150,11 +175,7 @@ class RepeaterPlugin(Star):
             return
 
         group_key = self._group_key(event)
-        state = self.state_service.group_states.get(group_key)
-        if not self.state_service.is_repeat_enabled(
-            group_key,
-            state,
-        ) and not self.state_service.is_interrupt_enabled(group_key, state):
+        if not await self.state_service.is_any_repeat_mode_enabled(group_key):
             return
 
         message = repeatable_message(event)
@@ -194,6 +215,71 @@ class RepeaterPlugin(Star):
         action = "打断复读" if attempt.interrupted else "复读"
         logger.info(
             f"[repeater] {group_key} 触发{action}: {attempt.response_text[:20]}",
+        )
+        if attempt.interrupted:
+            await self._handle_interrupt_mute(event, group_key, attempt)
+
+    async def _handle_interrupt_mute(
+        self,
+        event: AstrMessageEvent,
+        group_key: str,
+        attempt: RepeatAttempt,
+    ) -> None:
+        """处理打断复读后的禁言逻辑。
+
+        Args:
+            event: 触发打断的群消息事件。
+            group_key: 群状态键。
+            attempt: 已提交的打断复读尝试。
+        """
+        if not self.state_service.is_interrupt_mute_enabled(group_key):
+            return
+        if not await self._is_bot_admin(event):
+            return
+
+        settings = self.state_service.settings
+        if random.random() >= settings.interrupt_mute_probability:
+            return
+
+        duration = random.randint(
+            settings.interrupt_mute_duration_min,
+            settings.interrupt_mute_duration_max,
+        )
+        try:
+            bot = getattr(event, "bot", None)
+            call_action = getattr(bot, "call_action", None)
+            if not callable(call_action):
+                logger.warning(
+                    f"[repeater] {group_key} 事件无 aiocqhttp bot 客户端，无法执行禁言",
+                )
+                return
+            payload = {
+                "group_id": int(group_key),
+                "user_id": int(attempt.sender_id),
+                "duration": duration,
+            }
+            self_id = getattr(getattr(event, "message_obj", None), "self_id", None)
+            if self_id:
+                payload["self_id"] = self_id
+            await call_action("set_group_ban", **payload)
+        except Exception as exc:
+            logger.warning(f"[repeater] {group_key} 禁言失败: {exc}")
+            return
+
+        mute_text = random.choice(settings.interrupt_mute_texts)
+        sender_name = str(event.get_sender_name() or attempt.sender_id)
+        mute_text = mute_text.replace("{user}", sender_name).replace(
+            "{time}",
+            str(duration),
+        )
+        try:
+            await event.send(event.plain_result(mute_text))
+        except Exception:
+            logger.exception(f"[repeater] {group_key} 禁言提示发送失败")
+
+        logger.info(
+            f"[repeater] {group_key} 打断复读禁言: 用户 {attempt.sender_id} "
+            f"禁言 {duration}s",
         )
 
     @filter.command("自动复读", alias={"repeatMsg"})
@@ -278,7 +364,6 @@ class RepeaterPlugin(Star):
 
         settings = self.state_service.settings
         noun = "打断复读" if interrupt else "自动复读"
-        command = "打断复读" if interrupt else "自动复读"
         if action == "查看":
             enabled = (
                 await self.state_service.interrupt_enabled_for(group_key)
@@ -287,11 +372,23 @@ class RepeaterPlugin(Star):
             )
             status = "开启" if enabled else "关闭"
             if interrupt:
-                return (
+                base_info = (
                     f"本群{noun}：{status}\n"
                     f"打断概率：{settings.interrupt_probability * 100:g}%\n"
                     f"可选文本：{len(settings.interrupt_texts)} 条"
                 )
+                if enabled and self.state_service.is_interrupt_mute_enabled(group_key):
+                    mute_info = (
+                        "\n\n打断复读禁言：开启\n"
+                        f"禁言概率：{settings.interrupt_mute_probability * 100:g}%\n"
+                        "禁言时长："
+                        f"{settings.interrupt_mute_duration_min}-"
+                        f"{settings.interrupt_mute_duration_max}秒\n"
+                        f"提示文本：{len(settings.interrupt_mute_texts)} 条"
+                    )
+                else:
+                    mute_info = "\n\n打断复读禁言：关闭"
+                return base_info + mute_info
             return (
                 f"本群{noun}：{status}\n"
                 f"触发阈值：{settings.repeat_threshold} 名独立用户\n"
@@ -315,14 +412,14 @@ class RepeaterPlugin(Star):
         if action == "帮助":
             return (
                 "指令用法：\n"
-                f"{command} 查看 —— 查看本群是否开启该功能\n"
-                f"{command} 开启 —— 在本群开启该功能\n"
-                f"{command} 关闭 —— 在本群关闭该功能\n"
+                f"{noun} 查看 —— 查看本群是否开启该功能\n"
+                f"{noun} 开启 —— 在本群开启该功能\n"
+                f"{noun} 关闭 —— 在本群关闭该功能\n"
                 "开启/关闭仅限 AstrBot 管理员、群主或群管理员\n"
-                f"{command} 帮助 —— 查看命令帮助与用法"
+                f"{noun} 帮助 —— 查看命令帮助与用法"
             )
 
-        return f"未知子命令：{action}\n发送「{command} 帮助」查看用法。"
+        return f"未知子命令：{action}\n发送「{noun} 帮助」查看用法。"
 
     async def terminate(self) -> None:
         """阻止新处理器，等待活动任务后持久化最终状态。"""

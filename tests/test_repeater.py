@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import copy
 import json
 import unittest
@@ -14,16 +15,22 @@ from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Face, Image, Plain
 
 from main import PERMISSION_ERROR, RepeaterPlugin
+from repeater_config import (
+    DEFAULT_INTERRUPT_MUTE_TEXT,
+    DEFAULT_INTERRUPT_TEXT,
+    RepeaterSettings,
+    build_settings,
+)
 from repeater_messages import (
     RepeatableMessage,
     fingerprint as make_fingerprint,
     repeatable_message,
 )
 from repeater_service import (
-    DEFAULT_INTERRUPT_TEXT,
-    RepeaterSettings,
+    GroupRepeaterState,
     RepeaterStateService,
 )
+
 
 class ConfigSchemaTest(unittest.TestCase):
     def test_slider_fields_use_expected_ranges(self) -> None:
@@ -34,12 +41,37 @@ class ConfigSchemaTest(unittest.TestCase):
             "repeat_threshold": ("int", {"min": 2, "max": 50, "step": 1}),
             "repeat_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
             "interrupt_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
+            "interrupt_mute_duration_min": (
+                "int",
+                {"min": 1, "max": 3600, "step": 1},
+            ),
+            "interrupt_mute_duration_max": (
+                "int",
+                {"min": 1, "max": 3600, "step": 1},
+            ),
+            "interrupt_mute_probability": (
+                "float",
+                {"min": 0, "max": 1, "step": 0.01},
+            ),
         }
         for key, (field_type, slider) in expected_sliders.items():
             with self.subTest(key=key):
                 field = schema[key]
                 self.assertEqual(field["type"], field_type)
                 self.assertEqual(field["slider"], slider)
+
+    def test_interrupt_mute_fields_have_expected_defaults(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["interrupt_mute_enabled"]["type"], "bool")
+        self.assertFalse(schema["interrupt_mute_enabled"]["default"])
+        self.assertEqual(schema["interrupt_mute_disabled_group_ids"]["type"], "list")
+        self.assertEqual(schema["interrupt_mute_disabled_group_ids"]["default"], [])
+        self.assertEqual(schema["interrupt_mute_duration_min"]["default"], 1)
+        self.assertEqual(schema["interrupt_mute_duration_max"]["default"], 15)
+        self.assertEqual(schema["interrupt_mute_probability"]["default"], 0.05)
+        self.assertEqual(len(schema["interrupt_mute_texts"]["default"]), 5)
 
 
 class ImportPathTest(unittest.TestCase):
@@ -77,6 +109,109 @@ class ImportPathTest(unittest.TestCase):
             )
             self.assertEqual(package_import.returncode, 0, package_import.stderr)
 
+    def test_config_imports_directly_and_as_plugin_package(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temporary_root:
+            plugin_parent = Path(temporary_root) / "data" / "plugins"
+            plugin_parent.mkdir(parents=True)
+            os.symlink(
+                project_root,
+                plugin_parent / "astrbot_plugin_repeater",
+                target_is_directory=True,
+            )
+
+            direct_import = subprocess.run(
+                [sys.executable, "-c", "import repeater_config"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(direct_import.returncode, 0, direct_import.stderr)
+
+            package_import = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import importlib; "
+                    "importlib.import_module("
+                    "'data.plugins.astrbot_plugin_repeater.repeater_config'"
+                    ")",
+                ],
+                cwd=temporary_root,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(package_import.returncode, 0, package_import.stderr)
+
+
+class ConfigModuleTest(unittest.TestCase):
+    def test_build_settings_preserves_validation_and_warning_contract(self) -> None:
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.warnings: list[str] = []
+
+            def warning(self, message: str) -> None:
+                self.warnings.append(message)
+
+        logger = RecordingLogger()
+        settings = build_settings(
+            {
+                "repeat_disabled_group_ids": [1, " group ", True, ""],
+                "interrupt_disabled_group_ids": "invalid",
+                "repeat_threshold": True,
+                "repeat_probability": True,
+                "default_enabled": 1,
+                "interrupt_probability": True,
+                "interrupt_texts": (" 打断甲 ", "", 1),
+                "interrupt_default_enabled": "yes",
+                "interrupt_mute_enabled": 0,
+                "interrupt_mute_duration_min": 60,
+                "interrupt_mute_duration_max": 30,
+                "interrupt_mute_probability": True,
+                "interrupt_mute_texts": "invalid",
+            },
+            logger,
+        )
+
+        self.assertEqual(settings.repeat_disabled_group_ids, {"1", "group"})
+        self.assertEqual(settings.interrupt_disabled_group_ids, set())
+        self.assertEqual(settings.repeat_threshold, 3)
+        self.assertEqual(settings.repeat_probability, 0.3)
+        self.assertTrue(settings.default_enabled)
+        self.assertEqual(settings.interrupt_probability, 0.1)
+        self.assertEqual(settings.interrupt_texts, ("打断甲",))
+        self.assertTrue(settings.interrupt_default_enabled)
+        self.assertFalse(settings.interrupt_mute_enabled)
+        self.assertEqual(settings.interrupt_mute_duration_min, 60)
+        self.assertEqual(settings.interrupt_mute_duration_max, 60)
+        self.assertEqual(settings.interrupt_mute_probability, 0.05)
+        self.assertEqual(settings.interrupt_mute_texts, (DEFAULT_INTERRUPT_MUTE_TEXT,))
+        self.assertEqual(
+            logger.warnings,
+            [
+                "[repeater] interrupt_disabled_group_ids 非法，使用空列表",
+                "[repeater] repeat_threshold 非法(True)，回退为 3",
+                "[repeater] repeat_probability 非法(True)，回退为 0.3",
+                "[repeater] default_enabled 非法(1)，回退为 True",
+                "[repeater] interrupt_probability 非法(True)，回退为 0.1",
+                "[repeater] interrupt_default_enabled 非法(yes)，回退为 True",
+                "[repeater] interrupt_mute_enabled 非法(0)，回退为 False",
+                "[repeater] interrupt_mute_duration_max 小于 "
+                "interrupt_mute_duration_min，使用下限值",
+                "[repeater] interrupt_mute_probability 非法(True)，回退为 0.05",
+                "[repeater] interrupt_mute_texts 非法或为空，回退为默认禁言文本",
+            ],
+        )
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.actions: list[tuple[str, dict[str, object]]] = []
+
+    async def call_action(self, action: str, **payload: object) -> None:
+        self.actions.append((action, payload))
+
+
 class FakeEvent:
     def __init__(
         self,
@@ -93,6 +228,9 @@ class FakeEvent:
         group_owner: str = "",
         group_admins: list[str] | None = None,
         group_lookup_error: bool = False,
+        bot: object | None = None,
+        sender_name: str | None = None,
+        self_id: str | None = None,
     ) -> None:
         self.group_id = group_id
         self.sender_id = sender_id
@@ -103,6 +241,7 @@ class FakeEvent:
             message_id=message_id,
             message=message_chain,
             raw_message=raw_message,
+            self_id=self_id,
         )
         self.sent: list[object] = []
         self.stopped = False
@@ -113,6 +252,9 @@ class FakeEvent:
         self.group_owner = group_owner
         self.group_admins = group_admins or []
         self.group_lookup_error = group_lookup_error
+        self.bot = bot
+        self.sender_name = sender_name
+        self.self_id = self_id or "bot"
 
     def get_group_id(self) -> str:
         return self.group_id
@@ -130,7 +272,10 @@ class FakeEvent:
         return "onebot"
 
     def get_self_id(self) -> str:
-        return "bot"
+        return self.self_id
+
+    def get_sender_name(self) -> str:
+        return self.sender_name or self.sender_id
 
     def is_admin(self) -> bool:
         return self.astrbot_admin
@@ -156,6 +301,7 @@ class FakeEvent:
 
     def stop_event(self) -> None:
         self.stopped = True
+
 
 class MessageBoundaryTest(unittest.TestCase):
     def test_raw_mface_message_normalizes_to_replayable_chain(self) -> None:
@@ -290,6 +436,47 @@ class SequencedMemoryRepeater(MemoryRepeater):
         await super().put_kv_data(key, value)
 
 
+class GroupRepeaterStateSerializationTest(unittest.TestCase):
+    def test_round_trip_preserves_all_state_fields_and_sorts_collections(self) -> None:
+        raw_state = {
+            "enabled_override": True,
+            "interrupt_enabled_override": True,
+            "last_fingerprint": "current-fingerprint",
+            "repeated_users": ["user-z", 7, "user-a"],
+            "repeated_fingerprints": ["repeat-z", "repeat-a"],
+            "pending_fingerprints": ["pending-z", 3, "pending-a"],
+            "last_message_id": "message-42",
+        }
+
+        restored = GroupRepeaterState.from_dict(raw_state)
+
+        self.assertTrue(restored.enabled_override)
+        self.assertTrue(restored.interrupt_enabled_override)
+        self.assertEqual(restored.last_fingerprint, "current-fingerprint")
+        self.assertEqual(restored.repeated_users, {"user-z", "7", "user-a"})
+        self.assertEqual(
+            restored.repeated_fingerprints,
+            {"repeat-z", "repeat-a"},
+        )
+        self.assertEqual(
+            restored.pending_fingerprints,
+            {"pending-z", "3", "pending-a"},
+        )
+        self.assertEqual(restored.last_message_id, "message-42")
+        self.assertEqual(
+            restored.to_dict(),
+            {
+                "enabled_override": True,
+                "interrupt_enabled_override": True,
+                "last_fingerprint": "current-fingerprint",
+                "repeated_users": ["7", "user-a", "user-z"],
+                "repeated_fingerprints": ["repeat-a", "repeat-z"],
+                "pending_fingerprints": ["3", "pending-a", "pending-z"],
+                "last_message_id": "message-42",
+            },
+        )
+
+
 class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
     async def test_threshold_attempt_is_persisted_before_delivery(self) -> None:
         self.assertIsNotNone(RepeaterSettings)
@@ -307,12 +494,18 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
             config={},
             repeat_disabled_group_ids=set(),
             interrupt_disabled_group_ids=set(),
+            interrupt_mute_disabled_group_ids=set(),
             repeat_threshold=2,
             repeat_probability=1.0,
             default_enabled=True,
             interrupt_probability=0.0,
             interrupt_texts=("打断！",),
             interrupt_default_enabled=False,
+            interrupt_mute_enabled=False,
+            interrupt_mute_duration_min=1,
+            interrupt_mute_duration_max=15,
+            interrupt_mute_probability=0.0,
+            interrupt_mute_texts=("用户{user}因命中打断复读禁言策略而被禁言{time}s",),
         )
         service = RepeaterStateService(settings, load_states, save_states)
         await service.initialize()
@@ -329,11 +522,13 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
         attempt = await service.process_message("group", "B", "2", message)
 
         self.assertIsNotNone(attempt)
+        self.assertEqual(attempt.sender_id, "B")
         self.assertEqual(attempt.response_text, "内容")
         self.assertIn(
             "message-fingerprint",
             store["group_states"]["group"]["pending_fingerprints"],
         )
+
 
 async def run_command(
     plugin: RepeaterPlugin,
@@ -353,9 +548,13 @@ async def run_interrupt_command(
 
 class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     def test_default_repeat_probability_is_thirty_percent(self) -> None:
-        self.assertEqual(RepeaterPlugin(None, {}).state_service.settings.repeat_probability, 0.3)
         self.assertEqual(
-            RepeaterPlugin(None, {"repeat_probability": "invalid"}).state_service.settings.repeat_probability,
+            RepeaterPlugin(None, {}).state_service.settings.repeat_probability, 0.3
+        )
+        self.assertEqual(
+            RepeaterPlugin(
+                None, {"repeat_probability": "invalid"}
+            ).state_service.settings.repeat_probability,
             0.3,
         )
 
@@ -363,7 +562,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = RepeaterPlugin(None, {})
         self.assertTrue(plugin.state_service.settings.interrupt_default_enabled)
         self.assertEqual(plugin.state_service.settings.interrupt_probability, 0.1)
-        self.assertEqual(plugin.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertEqual(
+            plugin.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+        )
         self.assertEqual(len(plugin.state_service.settings.interrupt_texts), 1)
 
         invalid = RepeaterPlugin(
@@ -376,16 +577,73 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(invalid.state_service.settings.interrupt_default_enabled)
         self.assertEqual(invalid.state_service.settings.interrupt_probability, 0.1)
-        self.assertEqual(invalid.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertEqual(
+            invalid.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+        )
 
         empty = RepeaterPlugin(None, {"interrupt_texts": []})
-        self.assertEqual(empty.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,))
+        self.assertEqual(
+            empty.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+        )
 
         custom = RepeaterPlugin(
             None,
             {"interrupt_texts": [" 第一条 ", "", 2, "第二条"]},
         )
-        self.assertEqual(custom.state_service.settings.interrupt_texts, ("第一条", "第二条"))
+        self.assertEqual(
+            custom.state_service.settings.interrupt_texts, ("第一条", "第二条")
+        )
+
+    def test_interrupt_mute_config_validates_and_persists_groups(self) -> None:
+        defaults = RepeaterPlugin(None, {}).state_service.settings
+        self.assertEqual(defaults.interrupt_mute_duration_min, 1)
+        self.assertEqual(defaults.interrupt_mute_duration_max, 15)
+
+        config = MemoryConfig(
+            {
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_disabled_group_ids": [42, " blocked "],
+                "interrupt_mute_duration_min": 120,
+                "interrupt_mute_duration_max": 60,
+                "interrupt_mute_probability": 0.25,
+                "interrupt_mute_texts": [" {user} {time} ", "", 1],
+            },
+        )
+        plugin = RepeaterPlugin(None, config)
+        settings = plugin.state_service.settings
+
+        self.assertTrue(settings.interrupt_mute_enabled)
+        self.assertEqual(settings.interrupt_mute_disabled_group_ids, {"42", "blocked"})
+        self.assertEqual(settings.interrupt_mute_duration_min, 120)
+        self.assertEqual(settings.interrupt_mute_duration_max, 120)
+        self.assertEqual(settings.interrupt_mute_probability, 0.25)
+        self.assertEqual(settings.interrupt_mute_texts, ("{user} {time}",))
+        self.assertTrue(plugin.state_service.is_interrupt_mute_enabled("enabled"))
+        self.assertFalse(plugin.state_service.is_interrupt_mute_enabled("blocked"))
+
+        settings.save_config()
+        self.assertEqual(
+            config["interrupt_mute_disabled_group_ids"],
+            ["42", "blocked"],
+        )
+
+        invalid = RepeaterPlugin(
+            None,
+            {
+                "interrupt_mute_enabled": "yes",
+                "interrupt_mute_disabled_group_ids": "invalid",
+                "interrupt_mute_duration_min": 0,
+                "interrupt_mute_duration_max": True,
+                "interrupt_mute_probability": 1.1,
+                "interrupt_mute_texts": [],
+            },
+        ).state_service.settings
+        self.assertFalse(invalid.interrupt_mute_enabled)
+        self.assertEqual(invalid.interrupt_mute_disabled_group_ids, set())
+        self.assertEqual(invalid.interrupt_mute_duration_min, 1)
+        self.assertEqual(invalid.interrupt_mute_duration_max, 15)
+        self.assertEqual(invalid.interrupt_mute_probability, 0.05)
+        self.assertEqual(invalid.interrupt_mute_texts, (DEFAULT_INTERRUPT_MUTE_TEXT,))
 
     async def test_distinct_users_and_permanent_repeat_suppression(self) -> None:
         store: dict = {}
@@ -485,7 +743,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(first.sent)
         self.assertFalse(second.sent)
-        self.assertEqual(plugin.state_service.group_states["different-media"].repeated_users, {"B"})
+        self.assertEqual(
+            plugin.state_service.group_states["different-media"].repeated_users, {"B"}
+        )
 
     async def test_onebot_mface_uses_raw_identity_and_replays_in_order(self) -> None:
         plugin = MemoryRepeater({}, {"repeat_threshold": 2})
@@ -567,6 +827,94 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.sent)
         self.assertEqual(second.sent, [DEFAULT_INTERRUPT_TEXT])
 
+    async def test_interrupt_mute_bans_interrupter_and_sends_notice(self) -> None:
+        bot = FakeBot()
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["打断！"],
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_duration_min": 30,
+                "interrupt_mute_duration_max": 30,
+                "interrupt_mute_probability": 1.0,
+                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("10001", "A", "复读内容", "1")
+        interrupter = FakeEvent(
+            "10001",
+            "12345",
+            "复读内容",
+            "2",
+            bot=bot,
+            sender_name="打断者",
+            self_id="bot",
+            group_admins=["bot"],
+        )
+
+        with (
+            patch("repeater_service.random.random", return_value=0.0),
+            patch("main.random.random", return_value=0.0),
+        ):
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(interrupter)
+
+        self.assertEqual(interrupter.sent, ["打断！", "打断者 被禁言 30s"])
+        self.assertEqual(
+            bot.actions,
+            [
+                (
+                    "set_group_ban",
+                    {
+                        "group_id": 10001,
+                        "user_id": 12345,
+                        "duration": 30,
+                        "self_id": "bot",
+                    },
+                ),
+            ],
+        )
+        self.assertTrue(interrupter.stopped)
+        self.assertIn(
+            make_fingerprint("复读内容"),
+            plugin.state_service.group_states["10001"].repeated_fingerprints,
+        )
+
+    async def test_interrupt_mute_skips_non_admin_bot(self) -> None:
+        bot = FakeBot()
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["打断！"],
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_probability": 1.0,
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("10002", "A", "复读内容", "1")
+        interrupter = FakeEvent(
+            "10002",
+            "12345",
+            "复读内容",
+            "2",
+            bot=bot,
+            group_admins=[],
+        )
+
+        with patch("repeater_service.random.random", return_value=0.0):
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(interrupter)
+
+        self.assertEqual(interrupter.sent, ["打断！"])
+        self.assertEqual(bot.actions, [])
+
     async def test_interrupt_preempts_repeat_and_randomly_selects_text(self) -> None:
         plugin = MemoryRepeater(
             {},
@@ -585,7 +933,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("repeater_service.random.random", return_value=0.0),
-            patch("repeater_service.random.choice", return_value="打断乙") as choice_mock,
+            patch(
+                "repeater_service.random.choice", return_value="打断乙"
+            ) as choice_mock,
         ):
             await plugin.on_group_message(first)
             await plugin.on_group_message(second)
@@ -616,7 +966,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         second = FakeEvent("fallthrough", "B", "继续复读", "2")
 
         with (
-            patch("repeater_service.random.random", side_effect=[0.9, 0.0]) as random_mock,
+            patch(
+                "repeater_service.random.random", side_effect=[0.9, 0.0]
+            ) as random_mock,
             patch("repeater_service.random.choice") as choice_mock,
         ):
             await plugin.on_group_message(first)
@@ -824,11 +1176,23 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "关闭",
         )
         self.assertEqual(close_reply, ["已在本群关闭自动复读。"])
-        self.assertFalse(plugin.state_service.is_repeat_enabled("group-a", plugin.state_service.state_for("group-a")))
-        self.assertTrue(plugin.state_service.is_repeat_enabled("group-b", plugin.state_service.state_for("group-b")))
+        self.assertFalse(
+            plugin.state_service.is_repeat_enabled(
+                "group-a", plugin.state_service.state_for("group-a")
+            )
+        )
+        self.assertTrue(
+            plugin.state_service.is_repeat_enabled(
+                "group-b", plugin.state_service.state_for("group-b")
+            )
+        )
 
         plugin.state_service.settings.default_enabled = False
-        self.assertFalse(plugin.state_service.is_repeat_enabled("group-b", plugin.state_service.state_for("group-b")))
+        self.assertFalse(
+            plugin.state_service.is_repeat_enabled(
+                "group-b", plugin.state_service.state_for("group-b")
+            )
+        )
 
         open_reply = await run_command(
             plugin,
@@ -836,7 +1200,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "开启",
         )
         self.assertEqual(open_reply, ["已在本群开启自动复读。"])
-        self.assertTrue(plugin.state_service.is_repeat_enabled("group-a", plugin.state_service.state_for("group-a")))
+        self.assertTrue(
+            plugin.state_service.is_repeat_enabled(
+                "group-a", plugin.state_service.state_for("group-a")
+            )
+        )
 
     async def test_interrupt_command_has_independent_persisted_state(self) -> None:
         store: dict = {}
@@ -850,8 +1218,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         state = plugin.state_service.group_states["interrupt-command"]
         self.assertEqual(status_reply[0].splitlines()[0], "本群打断复读：关闭")
         self.assertEqual(open_reply, ["已在本群开启打断复读。"])
-        self.assertTrue(plugin.state_service.is_interrupt_enabled("interrupt-command", state))
-        self.assertTrue(plugin.state_service.is_repeat_enabled("interrupt-command", state))
+        self.assertTrue(
+            plugin.state_service.is_interrupt_enabled("interrupt-command", state)
+        )
+        self.assertTrue(
+            plugin.state_service.is_repeat_enabled("interrupt-command", state)
+        )
         self.assertTrue(
             store["group_states"]["interrupt-command"]["interrupt_enabled_override"]
         )
@@ -860,18 +1232,76 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await reloaded.initialize()
         reloaded_state = reloaded.state_service.group_states["interrupt-command"]
         self.assertTrue(
-            reloaded.state_service.is_interrupt_enabled("interrupt-command",
-            reloaded_state,)
+            reloaded.state_service.is_interrupt_enabled(
+                "interrupt-command",
+                reloaded_state,
+            )
         )
         close_reply = await run_interrupt_command(reloaded, event, "关闭")
         self.assertEqual(close_reply, ["已在本群关闭打断复读。"])
         self.assertFalse(
-            reloaded.state_service.is_interrupt_enabled("interrupt-command",
-            reloaded_state,)
+            reloaded.state_service.is_interrupt_enabled(
+                "interrupt-command",
+                reloaded_state,
+            )
         )
 
         help_reply = await run_interrupt_command(reloaded, event, "帮助")
         self.assertIn("打断复读 查看", help_reply[0])
+
+    async def test_interrupt_status_includes_mute_configuration(self) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "interrupt_default_enabled": True,
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_duration_min": 10,
+                "interrupt_mute_duration_max": 20,
+                "interrupt_mute_probability": 0.25,
+                "interrupt_mute_texts": ["甲", "乙"],
+            },
+        )
+        await plugin.initialize()
+
+        reply = await run_interrupt_command(
+            plugin,
+            FakeEvent("status", "member", "", "1"),
+            "查看",
+        )
+        self.assertIn("打断复读禁言：开启", reply[0])
+        self.assertIn("禁言概率：25%", reply[0])
+        self.assertIn("禁言时长：10-20秒", reply[0])
+        self.assertIn("提示文本：2 条", reply[0])
+
+        disabled_plugin = MemoryRepeater(
+            {},
+            {
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_disabled_group_ids": ["disabled-status"],
+            },
+        )
+        await disabled_plugin.initialize()
+        disabled_reply = await run_interrupt_command(
+            disabled_plugin,
+            FakeEvent("disabled-status", "member", "", "1"),
+            "查看",
+        )
+        self.assertTrue(disabled_reply[0].endswith("打断复读禁言：关闭"))
+        parent_disabled_plugin = MemoryRepeater(
+            {},
+            {
+                "interrupt_default_enabled": False,
+                "interrupt_mute_enabled": True,
+            },
+        )
+        await parent_disabled_plugin.initialize()
+        parent_disabled_reply = await run_interrupt_command(
+            parent_disabled_plugin,
+            FakeEvent("parent-disabled-status", "member", "", "1"),
+            "查看",
+        )
+        self.assertIn("本群打断复读：关闭", parent_disabled_reply[0])
+        self.assertTrue(parent_disabled_reply[0].endswith("打断复读禁言：关闭"))
 
     async def test_toggle_permissions_and_config_lists(self) -> None:
         config = MemoryConfig(
@@ -946,11 +1376,28 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             ["已在本群关闭自动复读。"],
         )
 
+    async def test_bot_mute_permission_accepts_owner_and_admin(self) -> None:
+        owner = FakeEvent("permissions", "member", "", "1", group_owner="bot")
+        group_admin = FakeEvent(
+            "permissions",
+            "member",
+            "",
+            "2",
+            group_admins=["bot"],
+        )
+        member = FakeEvent("permissions", "member", "", "3")
+
+        self.assertTrue(await RepeaterPlugin._is_bot_admin(owner))
+        self.assertTrue(await RepeaterPlugin._is_bot_admin(group_admin))
+        self.assertFalse(await RepeaterPlugin._is_bot_admin(member))
+
     async def test_configured_disabled_group_ids_apply_directly(self) -> None:
         config = MemoryConfig(
             {
                 "repeat_disabled_group_ids": ["configured"],
                 "interrupt_disabled_group_ids": ["configured"],
+                "interrupt_mute_enabled": True,
+                "interrupt_mute_disabled_group_ids": ["configured"],
             }
         )
         plugin = MemoryRepeater({}, config)
@@ -958,9 +1405,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(plugin.state_service.is_repeat_enabled("configured", None))
         self.assertFalse(plugin.state_service.is_interrupt_enabled("configured", None))
+        self.assertFalse(plugin.state_service.is_interrupt_mute_enabled("configured"))
         self.assertEqual(config.save_count, 0)
         self.assertEqual(config["repeat_disabled_group_ids"], ["configured"])
         self.assertEqual(config["interrupt_disabled_group_ids"], ["configured"])
+        self.assertEqual(config["interrupt_mute_disabled_group_ids"], ["configured"])
 
     async def test_config_save_failure_restores_toggle_state(self) -> None:
         config = MemoryConfig()
@@ -1012,6 +1461,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
 
+        self.assertFalse(
+            await plugin.state_service.is_any_repeat_mode_enabled("disabled"),
+        )
+        self.assertNotIn("disabled", plugin.state_service.group_states)
+        self.assertNotIn("disabled", plugin.state_service.group_locks)
+
         reply = await run_command(
             plugin,
             FakeEvent("disabled", "admin", "/自动复读 查看", "1", wake=True),
@@ -1023,6 +1478,72 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("disabled", plugin.state_service.group_states)
         self.assertNotIn("disabled", plugin.state_service.group_locks)
         self.assertEqual(store, {})
+
+    async def test_locked_read_only_group_query_reuses_existing_lock_without_state_allocation(
+        self,
+    ) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "default_enabled": False,
+                "interrupt_default_enabled": False,
+            },
+        )
+        await plugin.initialize()
+
+        service = plugin.state_service
+        group_key = "locked-read-only"
+        lock = service.lock_for(group_key)
+        self.assertIs(service.group_locks[group_key], lock)
+
+        query_task = None
+        try:
+            async with lock:
+                query_task = asyncio.create_task(
+                    service.is_any_repeat_mode_enabled(group_key)
+                )
+                await asyncio.sleep(0)
+                self.assertIsNotNone(query_task)
+                self.assertFalse(query_task.done())
+                self.assertNotIn(group_key, service.group_states)
+                self.assertIs(service.group_locks[group_key], lock)
+
+            self.assertIsNotNone(query_task)
+            self.assertFalse(await query_task)
+            self.assertNotIn(group_key, service.group_states)
+            self.assertIs(service.group_locks[group_key], lock)
+        finally:
+            if query_task is not None and not query_task.done():
+                query_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await query_task
+
+    async def test_mode_query_honors_defaults_and_existing_overrides(self) -> None:
+        plugin = MemoryRepeater(
+            {},
+            {
+                "default_enabled": False,
+                "interrupt_default_enabled": True,
+            },
+        )
+        await plugin.initialize()
+
+        self.assertTrue(
+            await plugin.state_service.is_any_repeat_mode_enabled("defaults"),
+        )
+        self.assertNotIn("defaults", plugin.state_service.group_states)
+        self.assertNotIn("defaults", plugin.state_service.group_locks)
+
+        group_key = "override"
+        plugin.state_service.settings.interrupt_disabled_group_ids.add(group_key)
+        plugin.state_service.group_states[group_key] = GroupRepeaterState(
+            enabled_override=True,
+        )
+
+        self.assertTrue(
+            await plugin.state_service.is_any_repeat_mode_enabled(group_key),
+        )
+
     async def test_disabled_group_skips_unparseable_message_chain(self) -> None:
         class ExplodingComponent:
             def toDict(self) -> dict:

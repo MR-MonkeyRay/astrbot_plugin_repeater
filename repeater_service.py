@@ -1,4 +1,4 @@
-"""复读状态机、配置验证及其持久化发送事务。
+"""复读状态机及其持久化发送事务。
 
 状态服务以单群锁和全局保存锁协调并发消息，确保发送前的 pending 标记和
 发送结果的提交或回滚保持一致。
@@ -11,12 +11,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 if __package__:
+    from .repeater_config import RepeaterSettings
     from .repeater_messages import RepeatableMessage
 else:
+    from repeater_config import RepeaterSettings
     from repeater_messages import RepeatableMessage
-
-
-DEFAULT_INTERRUPT_TEXT = "打断！"
 
 
 @dataclass(slots=True)
@@ -116,6 +115,7 @@ class RepeatAttempt:
         fingerprint: 要提交或回滚的消息指纹。
         message_id: 触发尝试的消息 ID。
         previous_message_id: 处理该消息前记录的消息 ID。
+        sender_id: 触发复读或打断的用户 ID。
         response_text: 要发送的纯文本或消息摘要。
         response_chain: 普通复读时要原样回发的消息链。
         interrupted: 该尝试是否为打断复读。
@@ -124,171 +124,10 @@ class RepeatAttempt:
     fingerprint: str
     message_id: str
     previous_message_id: str
+    sender_id: str
     response_text: str
     response_chain: tuple[Any, ...]
     interrupted: bool
-
-
-@dataclass(slots=True)
-class RepeaterSettings:
-    """经验证后供复读状态机使用的全局策略。
-
-    Attributes:
-        config: 可写回插件配置的原始配置对象。
-        repeat_disabled_group_ids: 被配置显式关闭普通复读的群 ID。
-        interrupt_disabled_group_ids: 被配置显式关闭打断复读的群 ID。
-        repeat_threshold: 触发复读所需的独立发送者数量。
-        repeat_probability: 达到阈值后普通复读的触发概率。
-        default_enabled: 普通复读的默认开关。
-        interrupt_probability: 达到阈值后优先打断的触发概率。
-        interrupt_texts: 打断命中时可随机选择的文本。
-        interrupt_default_enabled: 打断复读的默认开关。
-    """
-
-    config: dict[str, Any]
-    repeat_disabled_group_ids: set[str]
-    interrupt_disabled_group_ids: set[str]
-    repeat_threshold: int
-    repeat_probability: float
-    default_enabled: bool
-    interrupt_probability: float
-    interrupt_texts: tuple[str, ...]
-    interrupt_default_enabled: bool
-
-    def save_config(self) -> None:
-        """将禁用群列表写回配置，并触发配置对象的保存钩子。"""
-        self.config["repeat_disabled_group_ids"] = sorted(
-            self.repeat_disabled_group_ids,
-        )
-        self.config["interrupt_disabled_group_ids"] = sorted(
-            self.interrupt_disabled_group_ids,
-        )
-        save_config = getattr(self.config, "save_config", None)
-        if callable(save_config):
-            save_config()
-
-
-def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
-    """验证外部插件配置并构造运行时策略。
-
-    Args:
-        config: AstrBot 提供的可写配置字典。
-        logger: 用于记录非法配置回退原因的日志对象。
-
-    Returns:
-        所有字段已验证、非法值已回退的复读策略。
-    """
-    repeat_disabled_group_ids = _load_group_ids(
-        config.get("repeat_disabled_group_ids", []),
-        "repeat_disabled_group_ids",
-        logger,
-    )
-    interrupt_disabled_group_ids = _load_group_ids(
-        config.get("interrupt_disabled_group_ids", []),
-        "interrupt_disabled_group_ids",
-        logger,
-    )
-
-    threshold = config.get("repeat_threshold", 3)
-    if (
-        not isinstance(threshold, int)
-        or isinstance(threshold, bool)
-        or threshold < 2
-    ):
-        logger.warning(f"[repeater] repeat_threshold 非法({threshold})，回退为 3")
-        threshold = 3
-
-    probability = config.get("repeat_probability", 0.3)
-    if (
-        not isinstance(probability, (int, float))
-        or isinstance(probability, bool)
-        or not 0.0 <= probability <= 1.0
-    ):
-        logger.warning(
-            f"[repeater] repeat_probability 非法({probability})，回退为 0.3",
-        )
-        probability = 0.3
-
-    default_enabled = config.get("default_enabled", True)
-    if not isinstance(default_enabled, bool):
-        logger.warning(
-            f"[repeater] default_enabled 非法({default_enabled})，回退为 True",
-        )
-        default_enabled = True
-
-    interrupt_probability = config.get("interrupt_probability", 0.1)
-    if (
-        not isinstance(interrupt_probability, (int, float))
-        or isinstance(interrupt_probability, bool)
-        or not 0.0 <= interrupt_probability <= 1.0
-    ):
-        logger.warning(
-            "[repeater] interrupt_probability "
-            f"非法({interrupt_probability})，回退为 0.1",
-        )
-        interrupt_probability = 0.1
-
-    raw_interrupt_texts = config.get(
-        "interrupt_texts",
-        (DEFAULT_INTERRUPT_TEXT,),
-    )
-    if isinstance(raw_interrupt_texts, (list, tuple)):
-        interrupt_texts = tuple(
-            item.strip()
-            for item in raw_interrupt_texts
-            if isinstance(item, str) and item.strip()
-        )
-    else:
-        interrupt_texts = ()
-    if not interrupt_texts:
-        logger.warning(
-            "[repeater] interrupt_texts 非法或为空，回退为默认打断文本",
-        )
-        interrupt_texts = (DEFAULT_INTERRUPT_TEXT,)
-
-    interrupt_default_enabled = config.get("interrupt_default_enabled", True)
-    if not isinstance(interrupt_default_enabled, bool):
-        logger.warning(
-            "[repeater] interrupt_default_enabled "
-            f"非法({interrupt_default_enabled})，回退为 True",
-        )
-        interrupt_default_enabled = True
-
-    return RepeaterSettings(
-        config=config,
-        repeat_disabled_group_ids=repeat_disabled_group_ids,
-        interrupt_disabled_group_ids=interrupt_disabled_group_ids,
-        repeat_threshold=threshold,
-        repeat_probability=float(probability),
-        default_enabled=default_enabled,
-        interrupt_probability=float(interrupt_probability),
-        interrupt_texts=interrupt_texts,
-        interrupt_default_enabled=interrupt_default_enabled,
-    )
-
-
-def _load_group_ids(value: Any, field_name: str, logger: Any) -> set[str]:
-    """从配置字段读取可用的群 ID 集合。
-
-    Args:
-        value: 配置中读取的原始列表值。
-        field_name: 用于日志诊断的配置字段名。
-        logger: 用于记录字段类型错误的日志对象。
-
-    Returns:
-        去重、去空白并转换为字符串后的群 ID 集合。
-    """
-    if not isinstance(value, list):
-        logger.warning(f"[repeater] {field_name} 非法，使用空列表")
-        return set()
-    group_ids = set()
-    for item in value:
-        if not isinstance(item, (str, int)) or isinstance(item, bool):
-            continue
-        group_id = str(item).strip()
-        if group_id:
-            group_ids.add(group_id)
-    return group_ids
 
 
 class RepeaterStateService:
@@ -415,6 +254,19 @@ class RepeaterStateService:
             return self.settings.interrupt_default_enabled
         return state.interrupt_enabled_override
 
+    def is_interrupt_mute_enabled(self, group_id: str) -> bool:
+        """计算打断复读禁言在指定群的有效开关。
+
+        Args:
+            group_id: 要检查的群 ID。
+
+        Returns:
+            全局开关启用且群未被显式禁用时为 True。
+        """
+        if not self.settings.interrupt_mute_enabled:
+            return False
+        return group_id not in self.settings.interrupt_mute_disabled_group_ids
+
     async def repeat_enabled_for(self, group_key: str) -> bool:
         """在群锁保护下读取普通复读的有效开关。
 
@@ -436,6 +288,24 @@ class RepeaterStateService:
             打断复读当前是否有效。
         """
         return await self._enabled_for(group_key, interrupt=True)
+
+    async def is_any_repeat_mode_enabled(self, group_key: str) -> bool:
+        """在不分配群状态或锁的前提下读取任一复读模式是否有效。
+
+        若该群已有锁，本方法会在锁保护下读取状态；未知群则只按全局默认
+        配置和禁用群列表判断，不会创建状态或锁。
+        """
+        lock = self.group_locks.get(group_key)
+        if lock is None:
+            return self._any_repeat_mode_enabled(
+                group_key,
+                self.group_states.get(group_key),
+            )
+        async with lock:
+            return self._any_repeat_mode_enabled(
+                group_key,
+                self.group_states.get(group_key),
+            )
 
     async def set_repeat_enabled(self, group_key: str, enabled: bool) -> bool:
         """原子修改普通复读开关并持久化变更。
@@ -557,72 +427,65 @@ class RepeaterStateService:
 
                 fingerprint = message.fingerprint
                 if fingerprint != state.last_fingerprint:
-                    previous_fingerprint = state.last_fingerprint
-                    previous_users = state.repeated_users
-                    state.last_fingerprint = fingerprint
-                    state.repeated_users = {sender_id}
+                    previous_fingerprint, previous_users = self._start_sequence(
+                        state,
+                        fingerprint,
+                        sender_id,
+                    )
                     try:
                         await self._save_locked()
                     except (asyncio.CancelledError, Exception):
-                        state.last_message_id = previous_message_id
-                        state.last_fingerprint = previous_fingerprint
-                        state.repeated_users = previous_users
+                        self._restore_sequence(
+                            state,
+                            previous_message_id,
+                            previous_fingerprint,
+                            previous_users,
+                        )
                         raise
                     return None
 
-                if (
-                    fingerprint in state.repeated_fingerprints
-                    or fingerprint in state.pending_fingerprints
-                ):
+                if self._is_suppressed(state, fingerprint):
                     return None
 
-                sender_was_counted = sender_id in state.repeated_users
-                state.repeated_users.add(sender_id)
-                threshold_reached = (
-                    len(state.repeated_users) >= self.settings.repeat_threshold
+                sender_was_counted, interrupted = self._evaluate_continuation(
+                    state,
+                    sender_id,
+                    repeat_enabled,
+                    interrupt_enabled,
                 )
-                interrupted = (
-                    threshold_reached
-                    and interrupt_enabled
-                    and random.random() < self.settings.interrupt_probability
-                )
-                should_repeat = (
-                    threshold_reached
-                    and not interrupted
-                    and repeat_enabled
-                    and random.random() < self.settings.repeat_probability
-                )
-                if interrupted or should_repeat:
-                    response_text = (
-                        random.choice(self.settings.interrupt_texts)
-                        if interrupted
-                        else message.summary
+                if interrupted is not None:
+                    attempt = self._make_attempt(
+                        fingerprint,
+                        message_id,
+                        previous_message_id,
+                        sender_id,
+                        message,
+                        interrupted,
                     )
-                    response_chain = () if interrupted else message.chain
                     state.pending_fingerprints.add(fingerprint)
                     try:
                         await self._save_locked()
                     except (asyncio.CancelledError, Exception):
-                        state.pending_fingerprints.discard(fingerprint)
-                        if not sender_was_counted:
-                            state.repeated_users.discard(sender_id)
-                        state.last_message_id = previous_message_id
+                        self._restore_continuation(
+                            state,
+                            fingerprint,
+                            sender_id,
+                            sender_was_counted,
+                            previous_message_id,
+                        )
                         raise
-                    return RepeatAttempt(
-                        fingerprint=fingerprint,
-                        message_id=message_id,
-                        previous_message_id=previous_message_id,
-                        response_text=response_text,
-                        response_chain=response_chain,
-                        interrupted=interrupted,
-                    )
+                    return attempt
 
                 try:
                     await self._save_locked()
                 except (asyncio.CancelledError, Exception):
-                    if not sender_was_counted:
-                        state.repeated_users.discard(sender_id)
-                    state.last_message_id = previous_message_id
+                    self._restore_continuation(
+                        state,
+                        fingerprint,
+                        sender_id,
+                        sender_was_counted,
+                        previous_message_id,
+                    )
                     raise
                 return None
 
@@ -680,9 +543,7 @@ class RepeaterStateService:
                 previous_users = state.repeated_users
                 state.pending_fingerprints.discard(attempt.fingerprint)
                 state.repeated_fingerprints.add(attempt.fingerprint)
-                clears_current_sequence = (
-                    state.last_fingerprint == attempt.fingerprint
-                )
+                clears_current_sequence = state.last_fingerprint == attempt.fingerprint
                 if clears_current_sequence:
                     state.repeated_users = set()
                 try:
@@ -726,6 +587,120 @@ class RepeaterStateService:
                 if interrupt
                 else self.is_repeat_enabled(group_key, state)
             )
+
+    def _any_repeat_mode_enabled(
+        self,
+        group_key: str,
+        state: GroupRepeaterState | None,
+    ) -> bool:
+        """返回普通复读或打断复读是否至少有一个对该群有效。"""
+        return self.is_repeat_enabled(
+            group_key,
+            state,
+        ) or self.is_interrupt_enabled(group_key, state)
+
+    @staticmethod
+    def _start_sequence(
+        state: GroupRepeaterState,
+        fingerprint: str,
+        sender_id: str,
+    ) -> tuple[str, set[str]]:
+        """开始新的连续消息序列，并返回供失败恢复的旧状态。"""
+        previous_fingerprint = state.last_fingerprint
+        previous_users = state.repeated_users
+        state.last_fingerprint = fingerprint
+        state.repeated_users = {sender_id}
+        return previous_fingerprint, previous_users
+
+    @staticmethod
+    def _restore_sequence(
+        state: GroupRepeaterState,
+        previous_message_id: str,
+        previous_fingerprint: str,
+        previous_users: set[str],
+    ) -> None:
+        """恢复新序列保存失败前的状态。"""
+        state.last_message_id = previous_message_id
+        state.last_fingerprint = previous_fingerprint
+        state.repeated_users = previous_users
+
+    @staticmethod
+    def _is_suppressed(state: GroupRepeaterState, fingerprint: str) -> bool:
+        """判断指纹是否已经完成或仍在待确认发送中。"""
+        return (
+            fingerprint in state.repeated_fingerprints
+            or fingerprint in state.pending_fingerprints
+        )
+
+    def _evaluate_continuation(
+        self,
+        state: GroupRepeaterState,
+        sender_id: str,
+        repeat_enabled: bool,
+        interrupt_enabled: bool,
+    ) -> tuple[bool, bool | None]:
+        """记录发送者并在保持随机调用顺序下决定是否触发尝试。
+
+        返回发送者此前是否已计数，以及 None（未触发）、False（普通复读）
+        或 True（打断复读）。
+        """
+        sender_was_counted = sender_id in state.repeated_users
+        state.repeated_users.add(sender_id)
+        threshold_reached = len(state.repeated_users) >= self.settings.repeat_threshold
+        interrupted = (
+            threshold_reached
+            and interrupt_enabled
+            and random.random() < self.settings.interrupt_probability
+        )
+        should_repeat = (
+            threshold_reached
+            and not interrupted
+            and repeat_enabled
+            and random.random() < self.settings.repeat_probability
+        )
+        if interrupted:
+            return sender_was_counted, True
+        if should_repeat:
+            return sender_was_counted, False
+        return sender_was_counted, None
+
+    def _make_attempt(
+        self,
+        fingerprint: str,
+        message_id: str,
+        previous_message_id: str,
+        sender_id: str,
+        message: RepeatableMessage,
+        interrupted: bool,
+    ) -> RepeatAttempt:
+        """使用已决定的模式构造发送层所需的复读尝试。"""
+        return RepeatAttempt(
+            fingerprint=fingerprint,
+            message_id=message_id,
+            previous_message_id=previous_message_id,
+            sender_id=sender_id,
+            response_text=(
+                random.choice(self.settings.interrupt_texts)
+                if interrupted
+                else message.summary
+            ),
+            response_chain=() if interrupted else message.chain,
+            interrupted=interrupted,
+        )
+
+    @staticmethod
+    def _restore_continuation(
+        state: GroupRepeaterState,
+        fingerprint: str,
+        sender_id: str,
+        sender_was_counted: bool,
+        previous_message_id: str,
+    ) -> None:
+        """恢复连续消息序列保存失败前的可变字段。"""
+        state.pending_fingerprints.discard(fingerprint)
+        if not sender_was_counted:
+            state.repeated_users.discard(sender_id)
+        state.last_message_id = previous_message_id
 
     async def _save_locked(self) -> None:
         """持久化当前群状态快照。
