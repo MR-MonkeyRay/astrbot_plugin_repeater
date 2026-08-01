@@ -5,19 +5,29 @@
 """
 
 import asyncio
+from copy import deepcopy
 import inspect
 import random
+import time
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.star import Context, Star
+from astrbot.api.star import Context, Star, StarTools
+from astrbot.api.web import error_response, json_response, request
 
 if __package__:
-    from .repeater_config import build_settings
+    from .intelligent_history import (
+        IntelligentActionRecord,
+        IntelligentHistoryStore,
+    )
+    from .repeater_config import RepeaterSettings, build_settings
     from .repeater_messages import RepeatableMessage, repeatable_message
     from .repeater_service import RepeatAttempt, RepeaterStateService
 else:
-    from repeater_config import build_settings
+    from intelligent_history import IntelligentActionRecord, IntelligentHistoryStore
+    from repeater_config import RepeaterSettings, build_settings
     from repeater_messages import RepeatableMessage, repeatable_message
     from repeater_service import RepeatAttempt, RepeaterStateService
 
@@ -26,6 +36,27 @@ PERMISSION_ERROR = (
     "权限错误：仅 AstrBot 管理员、群主或群管理员可以开启或关闭。"
     "请向本群管理员或群主求助。"
 )
+
+PLUGIN_NAME = "astrbot_plugin_repeater"
+HISTORY_CLEANUP_INTERVAL_SECONDS = 60 * 60
+MAX_CONFIG_TEXT_LENGTH = 256
+MAX_HISTORY_PAGE = 10_000
+
+
+@dataclass(frozen=True, slots=True)
+class IntelligentGenerationResult:
+    """A completion result safe to expose to history and the Page."""
+
+    completion: str | None
+    provider_id: str | None
+    model: str
+    latency_ms: int
+    result_code: Literal[
+        "success",
+        "provider_resolution_failed",
+        "request_failed",
+        "invalid_response",
+    ]
 
 
 class RepeaterPlugin(Star):
@@ -54,13 +85,663 @@ class RepeaterPlugin(Star):
         )
         self.shutting_down = False
         self.active_handler_tasks: set[asyncio.Task] = set()
+        self.history_store: IntelligentHistoryStore | None = None
+        self._history_storage_error: str | None = None
+        self._history_cleanup_task: asyncio.Task[None] | None = None
+        self._history_write_tasks: set[asyncio.Task[None]] = set()
 
     async def initialize(self) -> None:
-        """从插件 KV 存储恢复可解析的各群状态。
-
-        无效状态由状态服务记录警告并跳过。
-        """
+        """恢复群状态、注册 Page API，并初始化可选历史存储。"""
         await self.state_service.initialize()
+        self._register_intelligent_console_routes()
+        await self._initialize_history_store()
+
+    def _plugin_route_prefix(self) -> str:
+        """Return the extension route prefix for the loaded plugin."""
+        plugin_name = getattr(self, "name", None)
+        if not isinstance(plugin_name, str) or not plugin_name.strip():
+            plugin_name = PLUGIN_NAME
+        return f"/{plugin_name.strip()}"
+
+    def _register_intelligent_console_routes(self) -> None:
+        """Register authenticated, drainable Page API handlers."""
+        register_web_api = getattr(
+            getattr(self, "context", None),
+            "register_web_api",
+            None,
+        )
+        if not callable(register_web_api):
+            return
+        prefix = f"{self._plugin_route_prefix()}/intelligent-console"
+        track = self._track_intelligent_console_handler
+        register_web_api(
+            f"{prefix}/config",
+            track(self._web_get_intelligent_console_config),
+            ["GET"],
+            "读取智能文案测试配置",
+        )
+        register_web_api(
+            f"{prefix}/models",
+            track(self._web_get_intelligent_console_models),
+            ["GET"],
+            "读取智能文案模型列表",
+        )
+        register_web_api(
+            f"{prefix}/config",
+            track(self._web_save_intelligent_console_config),
+            ["POST"],
+            "保存智能文案测试配置",
+        )
+        register_web_api(
+            f"{prefix}/test/repeat",
+            track(self._web_test_intelligent_repeat),
+            ["POST"],
+            "测试智能打断文案",
+        )
+        register_web_api(
+            f"{prefix}/test/mute",
+            track(self._web_test_intelligent_mute),
+            ["POST"],
+            "测试智能禁言提示文案",
+        )
+        register_web_api(
+            f"{prefix}/history",
+            track(self._web_get_intelligent_history),
+            ["GET"],
+            "读取智能文案生成记录",
+        )
+
+    def _track_intelligent_console_handler(self, handler):
+        """Bind a Page request to the same shutdown drain as event handlers."""
+
+        async def tracked_handler():
+            task = self._begin_handler()
+            if task is None:
+                return self._intelligent_console_shutdown_response()
+            try:
+                return await handler()
+            finally:
+                self._finish_handler(task)
+
+        return tracked_handler
+
+    async def _initialize_history_store(self) -> None:
+        """Initialize history only when production metadata supplies a plugin name."""
+        if self.history_store is None:
+            plugin_name = getattr(self, "name", None)
+            if not isinstance(plugin_name, str) or not plugin_name.strip():
+                return
+            try:
+                data_dir = StarTools.get_data_dir(plugin_name.strip())
+            except Exception:
+                logger.exception("[repeater] 智能记录数据目录不可用")
+                self._history_storage_error = "智能记录存储不可用。"
+                return
+            self.history_store = IntelligentHistoryStore(
+                data_dir / "intelligent_history.sqlite3",
+            )
+        try:
+            await self.history_store.initialize()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 智能记录数据库初始化失败")
+            self._history_storage_error = "智能记录存储不可用。"
+            return
+        self._history_storage_error = None
+        if self._history_cleanup_task is None or self._history_cleanup_task.done():
+            self._history_cleanup_task = asyncio.create_task(
+                self._history_cleanup_loop(),
+                name="repeater-intelligent-history-cleanup",
+            )
+
+    async def _history_cleanup_loop(self) -> None:
+        """Purge expired telemetry hourly until plugin termination."""
+        try:
+            while not self.shutting_down:
+                await asyncio.sleep(HISTORY_CLEANUP_INTERVAL_SECONDS)
+                if self.shutting_down:
+                    return
+                await self._purge_history()
+        except asyncio.CancelledError:
+            raise
+
+    async def _purge_history(self) -> None:
+        """Run one best-effort retention cleanup without affecting plugin behavior."""
+        if self.history_store is None:
+            return
+        try:
+            deleted = await self.history_store.purge_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 智能记录清理失败")
+            self._history_storage_error = "智能记录存储不可用。"
+            return
+        self._history_storage_error = None
+        if deleted:
+            logger.info(f"[repeater] 已清理 {deleted} 条过期智能记录")
+
+    @property
+    def _history_available(self) -> bool:
+        return self.history_store is not None and self._history_storage_error is None
+
+    async def _append_history_record(
+        self,
+        record: IntelligentActionRecord,
+    ) -> None:
+        """Persist one record while keeping history failures off the user path."""
+        if self.history_store is None:
+            return
+        try:
+            await self.history_store.append(record)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 智能记录写入失败")
+            self._history_storage_error = "智能记录存储不可用。"
+            return
+        self._history_storage_error = None
+
+    def _schedule_history_record(self, record: IntelligentActionRecord) -> None:
+        """Write runtime telemetry asynchronously after generation completes."""
+        if self.history_store is None:
+            return
+        task = asyncio.create_task(self._append_history_record(record))
+        self._history_write_tasks.add(task)
+        task.add_done_callback(self._history_write_tasks.discard)
+
+    async def _stop_history_cleanup_task(self) -> None:
+        """Cancel periodic retention work before active handlers are drained."""
+        current_task = asyncio.current_task()
+        cleanup_task = self._history_cleanup_task
+        self._history_cleanup_task = None
+        if cleanup_task is not None and cleanup_task is not current_task:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+
+    async def _drain_history_write_tasks(self) -> None:
+        """Await telemetry scheduled by handlers that finish during shutdown."""
+        current_task = asyncio.current_task()
+        write_tasks = tuple(
+            task for task in self._history_write_tasks if task is not current_task
+        )
+        if write_tasks:
+            await asyncio.gather(*write_tasks, return_exceptions=True)
+        self._history_write_tasks.difference_update(write_tasks)
+
+    async def _chat_provider_catalog(
+        self,
+    ) -> tuple[list[dict[str, str]], dict[str, Any], bool]:
+        """Return configured chat providers without exposing provider secrets."""
+        get_all_providers = getattr(
+            getattr(self, "context", None),
+            "get_all_providers",
+            None,
+        )
+        if not callable(get_all_providers):
+            return [], {}, False
+        try:
+            providers = get_all_providers()
+            if inspect.isawaitable(providers):
+                providers = await providers
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 读取聊天供应商列表失败")
+            return [], {}, False
+        if not isinstance(providers, (list, tuple)):
+            return [], {}, False
+        options: list[dict[str, str]] = []
+        provider_by_id: dict[str, Any] = {}
+        for provider in providers:
+            try:
+                metadata = provider.meta()
+                provider_id = getattr(metadata, "id", "")
+                current_model = getattr(metadata, "model", "")
+            except Exception:
+                continue
+            if not isinstance(provider_id, str) or not provider_id.strip():
+                continue
+            normalized_id = provider_id.strip()
+            if normalized_id in provider_by_id:
+                continue
+            provider_by_id[normalized_id] = provider
+            options.append(
+                {
+                    "id": normalized_id,
+                    "label": normalized_id,
+                    "current_model": (
+                        current_model.strip()
+                        if isinstance(current_model, str)
+                        else ""
+                    ),
+                },
+            )
+        options.sort(key=lambda item: item["id"].casefold())
+        return options, provider_by_id, True
+
+    @staticmethod
+    def _normalize_page_text(value: object, field_name: str) -> str:
+        """Validate one bounded, optional Page configuration value."""
+        if not isinstance(value, str):
+            raise ValueError(f"{field_name} 必须是字符串")
+        normalized = value.strip()
+        if len(normalized) > MAX_CONFIG_TEXT_LENGTH:
+            raise ValueError(
+                f"{field_name} 不能超过 {MAX_CONFIG_TEXT_LENGTH} 个字符"
+            )
+        return normalized
+
+    @staticmethod
+    def _parse_page_number(value: object, field_name: str) -> int:
+        """Parse a positive bounded-page query parameter."""
+        if not isinstance(value, str) or not value.isdecimal():
+            raise ValueError(f"{field_name} 必须是正整数")
+        number = int(value)
+        if number < 1:
+            raise ValueError(f"{field_name} 必须是正整数")
+        return number
+
+    def _intelligent_console_shutdown_response(self):
+        """Reject Page requests after the plugin has begun termination."""
+        if not self.shutting_down:
+            return None
+        return error_response("插件正在停止，智能文案测试暂不可用。", status_code=503)
+
+    async def _web_get_intelligent_console_config(self):
+        """Return saved settings, runtime switches, and available provider choices."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        options, provider_by_id, catalog_available = await self._chat_provider_catalog()
+        settings = self.state_service.settings
+        provider_id = settings.intelligent_interrupt_provider_id
+        return json_response(
+            {
+                "status": "ok",
+                "data": {
+                    "provider_id": provider_id,
+                    "model": settings.intelligent_interrupt_model,
+                    "provider_exists": (
+                        not provider_id
+                        or (catalog_available and provider_id in provider_by_id)
+                    ),
+                    "provider_catalog_available": catalog_available,
+                    "providers": options,
+                    "features": {
+                        "intelligent_repeat_enabled": (
+                            settings.intelligent_interrupt_enabled
+                        ),
+                        "intelligent_mute_enabled": (
+                            settings.intelligent_interrupt_mute_enabled
+                        ),
+                    },
+                    "history": {
+                        "available": self._history_available,
+                        "message": self._history_storage_error,
+                    },
+                },
+            },
+        )
+
+    async def _web_get_intelligent_console_models(self):
+        """Return model candidates for one explicit configured chat provider."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        raw_provider_id = request.query.get("provider_id", "")
+        try:
+            provider_id = self._normalize_page_text(
+                raw_provider_id,
+                "provider_id",
+            )
+        except ValueError as exc:
+            return error_response(str(exc))
+        if not provider_id:
+            return error_response("留空供应商时无法读取模型列表。")
+        _, provider_by_id, catalog_available = await self._chat_provider_catalog()
+        if not catalog_available:
+            return error_response("聊天供应商列表暂不可用。", status_code=503)
+        provider = provider_by_id.get(provider_id)
+        if provider is None:
+            return error_response("指定的聊天供应商不存在。", status_code=404)
+        try:
+            models = provider.get_models()
+            if inspect.isawaitable(models):
+                models = await models
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 读取智能文案模型列表失败")
+            return error_response(
+                "无法读取模型列表，仍可手动输入模型 ID。",
+                status_code=503,
+            )
+        if not isinstance(models, (list, tuple, set)):
+            return error_response(
+                "模型列表格式无效，仍可手动输入模型 ID。",
+                status_code=503,
+            )
+        model_ids = {
+            model.strip()
+            for model in models
+            if isinstance(model, str)
+            and model.strip()
+            and len(model.strip()) <= MAX_CONFIG_TEXT_LENGTH
+        }
+        settings = self.state_service.settings
+        saved_model = ""
+        if (
+            settings.intelligent_interrupt_provider_id == provider_id
+            and settings.intelligent_interrupt_model
+        ):
+            saved_model = settings.intelligent_interrupt_model
+        candidates = sorted(model_ids, key=str.casefold)[:500]
+        if saved_model and saved_model not in candidates:
+            if len(candidates) == 500:
+                candidates[-1] = saved_model
+            else:
+                candidates.append(saved_model)
+            candidates.sort(key=str.casefold)
+        return json_response(
+            {
+                "status": "ok",
+                "data": {"provider_id": provider_id, "models": candidates},
+            },
+        )
+
+    @staticmethod
+    def _save_astrbot_config_snapshot(
+        config: Any,
+        updates: dict[str, str],
+    ) -> tuple[bool, dict[str, Any]]:
+        """Write one AstrBotConfig snapshot without exposing a revision race."""
+        state_lock = config._save_state_lock
+        with state_lock:
+            previous_snapshot = deepcopy(dict(config))
+            try:
+                config.update(updates)
+                snapshot = deepcopy(dict(config))
+                revision = config._save_revision + 1
+                object.__setattr__(config, "_save_revision", revision)
+                committed = config._write_config_snapshot(snapshot, revision, 2)
+                if not committed:
+                    config.clear()
+                    config.update(previous_snapshot)
+            except BaseException:
+                config.clear()
+                config.update(previous_snapshot)
+                raise
+        return committed, snapshot
+
+    @staticmethod
+    async def _await_settled_config_save(awaitable):
+        """Finish a config write before deciding whether to propagate cancellation."""
+        task = asyncio.ensure_future(awaitable)
+        was_cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                was_cancelled = True
+        return task.result(), was_cancelled
+
+    async def _save_intelligent_console_config(
+        self,
+        *,
+        provider_id: str,
+        model: str,
+    ) -> bool:
+        """Persist the shared pair and publish its committed snapshot."""
+        updates = {
+            "intelligent_interrupt_provider_id": provider_id,
+            "intelligent_interrupt_model": model,
+        }
+        async with self.state_service.save_lock:
+            state_lock = getattr(self.config, "_save_state_lock", None)
+            write_snapshot = getattr(self.config, "_write_config_snapshot", None)
+            if (
+                callable(write_snapshot)
+                and hasattr(state_lock, "__enter__")
+                and hasattr(state_lock, "__exit__")
+            ):
+                (committed, snapshot), was_cancelled = (
+                    await self._await_settled_config_save(
+                        asyncio.to_thread(
+                            self._save_astrbot_config_snapshot,
+                            self.config,
+                            updates,
+                        ),
+                    )
+                )
+                if committed:
+                    settings = build_settings(snapshot, logger)
+                    settings.config = self.config
+                    self.state_service.settings = settings
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                return committed
+
+            previous_snapshot = deepcopy(dict(self.config))
+            save_config_async = getattr(self.config, "save_config_async", None)
+            try:
+                if callable(save_config_async):
+                    save_result, was_cancelled = (
+                        await self._await_settled_config_save(
+                            save_config_async(updates),
+                        )
+                    )
+                    if save_result is False:
+                        self.config.clear()
+                        self.config.update(previous_snapshot)
+                        if was_cancelled:
+                            raise asyncio.CancelledError
+                        return False
+                else:
+                    was_cancelled = False
+                    self.config.update(updates)
+                    save_config = getattr(self.config, "save_config", None)
+                    if callable(save_config):
+                        save_result = save_config()
+                        if inspect.isawaitable(save_result):
+                            _, was_cancelled = await self._await_settled_config_save(
+                                save_result,
+                            )
+            except Exception:
+                self.config.clear()
+                self.config.update(previous_snapshot)
+                raise
+            self.state_service.settings = build_settings(self.config, logger)
+            if was_cancelled:
+                raise asyncio.CancelledError
+        return True
+
+    async def _web_save_intelligent_console_config(self):
+        """Validate and persist the Page's shared provider/model selection."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        body = await request.json(default=None)
+        if not isinstance(body, dict):
+            return error_response("请求体必须是 JSON 对象。")
+        try:
+            provider_id = self._normalize_page_text(
+                body.get("provider_id", ""),
+                "provider_id",
+            )
+            model = self._normalize_page_text(body.get("model", ""), "model")
+        except ValueError as exc:
+            return error_response(str(exc))
+        if provider_id:
+            _, provider_by_id, catalog_available = await self._chat_provider_catalog()
+            if not catalog_available:
+                return error_response("聊天供应商列表暂不可用。", status_code=503)
+            if provider_id not in provider_by_id:
+                return error_response("指定的聊天供应商不存在。", status_code=404)
+        try:
+            committed = await self._save_intelligent_console_config(
+                provider_id=provider_id,
+                model=model,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 保存智能文案 Page 配置失败")
+            return error_response("保存智能文案配置失败。", status_code=500)
+        if not committed:
+            return error_response("配置正在被其他操作更新，请刷新后重试。", status_code=409)
+        return json_response(
+            {
+                "status": "ok",
+                "data": {"provider_id": provider_id, "model": model},
+            },
+        )
+
+    async def _record_manual_generation(
+        self,
+        *,
+        kind: Literal["repeat", "mute"],
+        result: IntelligentGenerationResult,
+    ) -> None:
+        """Synchronously retain a Page test so an immediate history refresh sees it."""
+        outcome: Literal["success", "fallback", "failed"] = (
+            "success" if result.result_code == "success" else "failed"
+        )
+        await self._append_history_record(
+            self._history_record_for_generation(
+                result,
+                kind=kind,
+                source="manual_test",
+                outcome=outcome,
+            ),
+        )
+
+    async def _web_run_intelligent_console_test(
+        self,
+        *,
+        kind: Literal["repeat", "mute"],
+    ):
+        """Run a fixed, non-destructive generation test for one intelligent feature."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        settings = self.state_service.settings
+        provider_id = settings.intelligent_interrupt_provider_id
+        model = settings.intelligent_interrupt_model
+        if not provider_id:
+            result = IntelligentGenerationResult(
+                completion=None,
+                provider_id=None,
+                model=model,
+                latency_ms=0,
+                result_code="provider_resolution_failed",
+            )
+            await self._record_manual_generation(kind=kind, result=result)
+            return error_response(
+                "留空供应商会跟随触发会话；页面测试需要先保存一个明确的聊天供应商。",
+                status_code=409,
+                data={"code": result.result_code},
+            )
+        _, provider_by_id, catalog_available = await self._chat_provider_catalog()
+        if not catalog_available or provider_id not in provider_by_id:
+            result = IntelligentGenerationResult(
+                completion=None,
+                provider_id=provider_id if catalog_available else None,
+                model=model,
+                latency_ms=0,
+                result_code="provider_resolution_failed",
+            )
+            await self._record_manual_generation(kind=kind, result=result)
+            return error_response(
+                "保存的聊天供应商当前不可用，请重新选择后保存。",
+                status_code=409 if catalog_available else 503,
+                data={"code": result.result_code},
+            )
+        if kind == "repeat":
+            prompt = "被复读的内容：这是智能打断测试使用的固定示例消息。"
+            system_prompt = settings.intelligent_interrupt_prompt
+            feature_name = "智能打断测试"
+        else:
+            prompt = "被禁言用户：测试用户\n禁言时长：60秒"
+            system_prompt = settings.intelligent_interrupt_mute_prompt
+            feature_name = "智能禁言提示测试"
+        result = await self._run_intelligent_generation(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            provider_id=provider_id,
+            model=model,
+            unified_msg_origin=None,
+            feature_name=feature_name,
+        )
+        await self._record_manual_generation(kind=kind, result=result)
+        if result.result_code != "success":
+            return error_response(
+                "智能文案生成失败，请检查供应商和模型配置。",
+                status_code=502,
+                data={"code": result.result_code},
+            )
+        return json_response(
+            {
+                "status": "ok",
+                "data": {
+                    "text": result.completion,
+                    "provider_id": result.provider_id,
+                    "model": result.model,
+                    "latency_ms": result.latency_ms,
+                },
+            },
+        )
+
+    async def _web_test_intelligent_repeat(self):
+        """Run only the repeat prompt; never send a group message."""
+        return await self._web_run_intelligent_console_test(kind="repeat")
+
+    async def _web_test_intelligent_mute(self):
+        """Run only the mute-notice prompt; never call moderation APIs."""
+        return await self._web_run_intelligent_console_test(kind="mute")
+
+    async def _web_get_intelligent_history(self):
+        """Serve bounded, time-windowed metadata-only intelligent history."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        if not self._history_available:
+            return error_response(
+                self._history_storage_error or "智能记录存储不可用。",
+                status_code=503,
+            )
+        raw_window = request.query.get("window", "day")
+        raw_kind = request.query.get("kind", "all")
+        try:
+            if raw_window not in {"day", "24h", "2d", "3d", "7d"}:
+                raise ValueError("window 必须是 day、24h、2d、3d 或 7d。")
+            if raw_kind not in {"all", "repeat", "mute"}:
+                raise ValueError("kind 必须是 all、repeat 或 mute。")
+            page = self._parse_page_number(request.query.get("page", "1"), "page")
+            if page > MAX_HISTORY_PAGE:
+                raise ValueError(f"page 不能超过 {MAX_HISTORY_PAGE}。")
+            page_size = self._parse_page_number(
+                request.query.get("page_size", "50"),
+                "page_size",
+            )
+            if page_size > 100:
+                raise ValueError("page_size 不能超过 100。")
+        except ValueError as exc:
+            return error_response(str(exc))
+        try:
+            history_page = await self.history_store.query(
+                window=raw_window,
+                kind=None if raw_kind == "all" else raw_kind,
+                page=page,
+                page_size=page_size,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 读取智能记录失败")
+            return error_response("智能记录存储不可用。", status_code=503)
+        return json_response({"status": "ok", "data": history_page.to_dict()})
 
     @staticmethod
     def _group_key(event: AstrMessageEvent) -> str:
@@ -193,15 +874,17 @@ class RepeaterPlugin(Star):
             return
 
         response_text = attempt.response_text
+        settings = self.state_service.settings
         if (
             attempt.interrupted
-            and self.state_service.settings.intelligent_interrupt_enabled
+            and settings.intelligent_interrupt_enabled
         ):
             try:
                 response_text = await self._generate_intelligent_interrupt(
                     event,
                     message,
                     attempt.response_text,
+                    settings=settings,
                 )
             except asyncio.CancelledError:
                 try:
@@ -253,46 +936,198 @@ class RepeaterPlugin(Star):
         if attempt.interrupted:
             await self._handle_interrupt_mute(event, group_key, attempt)
 
+    async def _run_intelligent_generation(
+        self,
+        *,
+        prompt: str,
+        system_prompt: str,
+        provider_id: str,
+        model: str,
+        unified_msg_origin: str | None,
+        feature_name: str,
+    ) -> IntelligentGenerationResult:
+        """Generate one completion without fallback text or side effects."""
+        started_at = time.perf_counter_ns()
+        requested_model = model.strip()
+        chat_provider_id = provider_id.strip()
+        if not chat_provider_id:
+            if not unified_msg_origin:
+                return IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=None,
+                    model=requested_model,
+                    latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                    result_code="provider_resolution_failed",
+                )
+            try:
+                current_provider_id = self.context.get_current_chat_provider_id(
+                    unified_msg_origin,
+                )
+                if inspect.isawaitable(current_provider_id):
+                    current_provider_id = await current_provider_id
+                if not isinstance(current_provider_id, str):
+                    raise ValueError("current provider ID is not a string")
+                chat_provider_id = current_provider_id.strip()
+                if not chat_provider_id:
+                    raise ValueError("current provider ID is empty")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(f"[repeater] {feature_name}供应商解析失败: {exc}")
+                return IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=None,
+                    model=requested_model,
+                    latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                    result_code="provider_resolution_failed",
+                )
+        model_kwargs = {"model": requested_model} if requested_model else {}
+        try:
+            response = await self.context.llm_generate(
+                chat_provider_id=chat_provider_id,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                **model_kwargs,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"[repeater] {feature_name}生成请求失败: {exc}")
+            return IntelligentGenerationResult(
+                completion=None,
+                provider_id=chat_provider_id,
+                model=requested_model,
+                latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                result_code="request_failed",
+            )
+        if getattr(response, "role", None) != "assistant":
+            logger.warning(f"[repeater] {feature_name}收到非助手响应")
+            return IntelligentGenerationResult(
+                completion=None,
+                provider_id=chat_provider_id,
+                model=requested_model,
+                latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                result_code="invalid_response",
+            )
+        completion_text = str(getattr(response, "completion_text", "") or "").strip()
+        if not completion_text:
+            logger.warning(f"[repeater] {feature_name}收到空响应")
+            return IntelligentGenerationResult(
+                completion=None,
+                provider_id=chat_provider_id,
+                model=requested_model,
+                latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                result_code="invalid_response",
+            )
+        return IntelligentGenerationResult(
+            completion=completion_text,
+            provider_id=chat_provider_id,
+            model=requested_model,
+            latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+            result_code="success",
+        )
+
+    @staticmethod
+    def _history_record_for_generation(
+        result: IntelligentGenerationResult,
+        *,
+        kind: Literal["repeat", "mute"],
+        source: Literal["runtime", "manual_test"],
+        outcome: Literal["success", "fallback", "failed"],
+        group_id: str | None = None,
+        mute_duration_seconds: int | None = None,
+    ) -> IntelligentActionRecord:
+        """Build the content-free telemetry row for a completed generation."""
+        return IntelligentActionRecord(
+            occurred_at_ms=time.time_ns() // 1_000_000,
+            kind=kind,
+            source=source,
+            outcome=outcome,
+            provider_id=result.provider_id,
+            model=result.model,
+            group_id=group_id,
+            mute_duration_seconds=mute_duration_seconds,
+            latency_ms=result.latency_ms,
+            failure_code=(
+                None if result.result_code == "success" else result.result_code
+            ),
+        )
+
+    async def _generate_intelligent_text(
+        self,
+        event: AstrMessageEvent,
+        settings: RepeaterSettings,
+        *,
+        prompt: str,
+        system_prompt: str,
+        fallback_text: str,
+        feature_name: str,
+        history_kind: Literal["repeat", "mute"],
+        mute_duration_seconds: int | None = None,
+    ) -> str:
+        """Generate runtime text and asynchronously retain its safe outcome."""
+        result = await self._run_intelligent_generation(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            provider_id=settings.intelligent_interrupt_provider_id,
+            model=settings.intelligent_interrupt_model,
+            unified_msg_origin=getattr(event, "unified_msg_origin", None),
+            feature_name=feature_name,
+        )
+        outcome: Literal["success", "fallback", "failed"] = (
+            "success" if result.result_code == "success" else "fallback"
+        )
+        self._schedule_history_record(
+            self._history_record_for_generation(
+                result,
+                kind=history_kind,
+                source="runtime",
+                outcome=outcome,
+                group_id=self._group_key(event),
+                mute_duration_seconds=mute_duration_seconds,
+            ),
+        )
+        return result.completion if result.completion is not None else fallback_text
+
     async def _generate_intelligent_interrupt(
         self,
         event: AstrMessageEvent,
         message: RepeatableMessage,
         fallback_text: str,
+        *,
+        settings: RepeaterSettings,
     ) -> str:
-        """生成智能打断文本；生成失败时返回既有随机后备文本。"""
-        settings = self.state_service.settings
-        try:
-            chat_provider_id = settings.intelligent_interrupt_provider_id
-            if not chat_provider_id:
-                current_provider_id = self.context.get_current_chat_provider_id(
-                    event.unified_msg_origin,
-                )
-                if inspect.isawaitable(current_provider_id):
-                    chat_provider_id = await current_provider_id
-                else:
-                    chat_provider_id = current_provider_id
-            model_kwargs = (
-                {"model": settings.intelligent_interrupt_model}
-                if settings.intelligent_interrupt_model
-                else {}
-            )
-            response = await self.context.llm_generate(
-                chat_provider_id=chat_provider_id,
-                prompt=f"被复读的内容：{message.text or message.summary}",
-                system_prompt=settings.intelligent_interrupt_prompt,
-                **model_kwargs,
-            )
-            if response.role != "assistant":
-                raise ValueError(f"unexpected LLM response role: {response.role!r}")
-            completion_text = (response.completion_text or "").strip()
-            if not completion_text:
-                raise ValueError("empty LLM completion")
-            return completion_text
-        except Exception as exc:
-            logger.warning(
-                f"[repeater] {self._group_key(event)} 智能打断生成失败: {exc}",
-            )
-            return fallback_text
+        """Generate intelligent interrupt text or retain the existing fallback."""
+        return await self._generate_intelligent_text(
+            event,
+            settings=settings,
+            prompt=f"被复读的内容：{message.text or message.summary}",
+            system_prompt=settings.intelligent_interrupt_prompt,
+            fallback_text=fallback_text,
+            feature_name="智能打断",
+            history_kind="repeat",
+        )
+
+    async def _generate_intelligent_interrupt_mute_notice(
+        self,
+        event: AstrMessageEvent,
+        *,
+        sender_name: str,
+        duration: int,
+        fallback_text: str,
+        settings: RepeaterSettings,
+    ) -> str:
+        """Generate intelligent mute notice or retain the existing fallback."""
+        return await self._generate_intelligent_text(
+            event,
+            settings=settings,
+            prompt=f"被禁言用户：{sender_name}\n禁言时长：{duration}秒",
+            system_prompt=settings.intelligent_interrupt_mute_prompt,
+            fallback_text=fallback_text,
+            feature_name="智能禁言提示",
+            history_kind="mute",
+            mute_duration_seconds=duration,
+        )
 
     async def _handle_interrupt_mute(
         self,
@@ -341,12 +1176,21 @@ class RepeaterPlugin(Star):
             logger.warning(f"[repeater] {group_key} 禁言失败: {exc}")
             return
 
-        mute_text = random.choice(settings.interrupt_mute_texts)
+        fallback_text = random.choice(settings.interrupt_mute_texts)
         sender_name = str(event.get_sender_name() or attempt.sender_id)
-        mute_text = mute_text.replace("{user}", sender_name).replace(
+        fallback_text = fallback_text.replace("{user}", sender_name).replace(
             "{time}",
             str(duration),
         )
+        mute_text = fallback_text
+        if settings.intelligent_interrupt_mute_enabled:
+            mute_text = await self._generate_intelligent_interrupt_mute_notice(
+                event,
+                sender_name=sender_name,
+                duration=duration,
+                fallback_text=fallback_text,
+                settings=settings,
+            )
         try:
             await event.send(event.plain_result(mute_text))
         except Exception:
@@ -497,12 +1341,14 @@ class RepeaterPlugin(Star):
         return f"未知子命令：{action}\n发送「{noun} 帮助」查看用法。"
 
     async def terminate(self) -> None:
-        """阻止新处理器，等待活动任务后持久化最终状态。"""
+        """Stop cleanup, drain handlers and telemetry, then persist group state."""
         self.shutting_down = True
+        await self._stop_history_cleanup_task()
         current_task = asyncio.current_task()
         active_tasks = tuple(
             task for task in self.active_handler_tasks if task is not current_task
         )
         if active_tasks:
             await asyncio.gather(*active_tasks, return_exceptions=True)
+        await self._drain_history_write_tasks()
         await self.state_service.save()
