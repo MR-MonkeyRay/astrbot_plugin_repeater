@@ -10,14 +10,17 @@ import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
+from typing import Callable
 
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Face, Image, Plain
+from astrbot.api.provider import LLMResponse
 
 from main import PERMISSION_ERROR, RepeaterPlugin
 from repeater_config import (
     DEFAULT_INTERRUPT_MUTE_TEXT,
     DEFAULT_INTERRUPT_TEXT,
+    DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
     RepeaterSettings,
     build_settings,
 )
@@ -72,6 +75,162 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(schema["interrupt_mute_duration_max"]["default"], 15)
         self.assertEqual(schema["interrupt_mute_probability"]["default"], 0.05)
         self.assertEqual(len(schema["interrupt_mute_texts"]["default"]), 5)
+
+    def test_intelligent_interrupt_fields_have_expected_defaults(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(schema["intelligent_interrupt_enabled"]["type"], "bool")
+        self.assertFalse(schema["intelligent_interrupt_enabled"]["default"])
+        self.assertEqual(schema["intelligent_interrupt_provider_id"]["type"], "string")
+        self.assertEqual(schema["intelligent_interrupt_provider_id"]["default"], "")
+        self.assertEqual(schema["intelligent_interrupt_model"]["type"], "string")
+        self.assertEqual(schema["intelligent_interrupt_model"]["default"], "")
+        self.assertEqual(schema["intelligent_interrupt_prompt"]["type"], "text")
+        self.assertEqual(
+            schema["intelligent_interrupt_prompt"]["default"],
+            DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+        )
+
+    def test_configuration_schema_is_complete_and_descriptive(self) -> None:
+        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+        expected_schema = {
+            "default_enabled": {
+                "type": "bool",
+                "default": True,
+                "description": "默认开启复读",
+                "hint": "未被群级开关单独设置的群是否默认开启复读。",
+            },
+            "repeat_disabled_group_ids": {
+                "type": "list",
+                "default": [],
+                "items": {"type": "string"},
+                "description": "关闭复读的群号",
+                "hint": "由复读开关指令维护；列表中的群不触发普通复读。",
+            },
+            "repeat_threshold": {
+                "type": "int",
+                "default": 3,
+                "slider": {"min": 2, "max": 50, "step": 1},
+                "description": "复读触发人数",
+                "hint": "同一内容需由多少名不同用户发送（含首位）才达到复读条件。",
+            },
+            "repeat_probability": {
+                "type": "float",
+                "default": 0.3,
+                "slider": {"min": 0, "max": 1, "step": 0.01},
+                "description": "复读概率",
+                "hint": "达到复读条件且未命中打断时，回发原消息的概率（0%–100%）。",
+            },
+            "interrupt_default_enabled": {
+                "type": "bool",
+                "default": True,
+                "description": "默认开启打断复读",
+                "hint": "未被群级开关单独设置的群是否默认开启打断复读。",
+            },
+            "interrupt_disabled_group_ids": {
+                "type": "list",
+                "default": [],
+                "items": {"type": "string"},
+                "description": "关闭打断复读的群号",
+                "hint": "由打断复读开关指令维护；列表中的群不触发打断复读。",
+            },
+            "interrupt_probability": {
+                "type": "float",
+                "default": 0.1,
+                "slider": {"min": 0, "max": 1, "step": 0.01},
+                "description": "打断概率",
+                "hint": "达到阈值后优先发送打断文本的概率（0%–100%）。",
+            },
+            "interrupt_texts": {
+                "type": "list",
+                "default": [
+                    "叮——复读结界已启动，下一位请说点新鲜的！",
+                    "抓到一群小鹦鹉，统统没收作案声带～",
+                    "前方禁止复制粘贴，本喵要开始随机巡逻啦！",
+                    "复读能量过载！啪叽一下，频道已被我掐断。",
+                    "同一句再来一遍就要收费啦，先欠我一颗糖！",
+                ],
+                "items": {"type": "string"},
+                "description": "随机打断文案",
+                "hint": "智能打断关闭、不可用或生成失败时，从此列表随机选择；留空使用“打断！”。",
+            },
+            "intelligent_interrupt_enabled": {
+                "type": "bool",
+                "default": False,
+                "description": "智能打断复读",
+                "hint": "开启后，打断命中时使用 AstrBot 已配置的聊天供应商生成一条打断文案；默认关闭。",
+            },
+            "intelligent_interrupt_provider_id": {
+                "type": "string",
+                "default": "",
+                "description": "聊天供应商 ID",
+                "hint": "填写 AstrBot WebUI 已配置的聊天供应商 ID；留空使用触发会话当前供应商。",
+            },
+            "intelligent_interrupt_model": {
+                "type": "string",
+                "default": "",
+                "description": "智能打断模型",
+                "hint": "填写所选供应商可用的模型 ID；留空使用该供应商默认模型。",
+            },
+            "intelligent_interrupt_prompt": {
+                "type": "text",
+                "default": DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+                "description": "智能打断提示词",
+                "hint": "作为生成打断文案的 LLM 系统提示词；空值或非法值回退默认提示词。",
+            },
+            "interrupt_mute_enabled": {
+                "type": "bool",
+                "default": False,
+                "description": "打断复读禁言",
+                "hint": "开启后，打断复读触发时按概率尝试禁言触发用户；默认关闭。",
+            },
+            "interrupt_mute_disabled_group_ids": {
+                "type": "list",
+                "default": [],
+                "items": {"type": "string"},
+                "description": "关闭禁言的群号",
+                "hint": "列表中的群不执行打断复读禁言。",
+            },
+            "interrupt_mute_duration_min": {
+                "type": "int",
+                "default": 1,
+                "slider": {"min": 1, "max": 3600, "step": 1},
+                "description": "最短禁言时长",
+                "hint": "随机禁言时长的下限，单位秒；应不大于最长禁言时长。",
+            },
+            "interrupt_mute_duration_max": {
+                "type": "int",
+                "default": 15,
+                "slider": {"min": 1, "max": 3600, "step": 1},
+                "description": "最长禁言时长",
+                "hint": "随机禁言时长的上限，单位秒；应不小于最短禁言时长。",
+            },
+            "interrupt_mute_probability": {
+                "type": "float",
+                "default": 0.05,
+                "slider": {"min": 0, "max": 1, "step": 0.01},
+                "description": "禁言概率",
+                "hint": "打断复读触发后尝试禁言的概率（0%–100%）。",
+            },
+            "interrupt_mute_texts": {
+                "type": "list",
+                "default": [
+                    "你以为你打断了复读？错！你已经被打断了人生 {time} 秒 🤐",
+                    "打断复读？不好意思，你也被打断发言权了，{time}秒后见 😏",
+                    "恭喜 {user} 同学成功触发【打断复读禁言】成就，奖励禁言 {time} 秒 🎉",
+                    "复读虽可恶，打断更该罚！{user} 请安静 {time} 秒反思一下 🤔",
+                    "检测到反复读行为，根据群规第114514条，{user} 将被禁言 {time} 秒 ⚖️",
+                ],
+                "items": {"type": "string"},
+                "description": "禁言提示文案",
+                "hint": "禁言成功时随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空使用默认文案。",
+            },
+        }
+        self.maxDiff = None
+        self.assertEqual(schema, expected_schema)
 
 
 class ImportPathTest(unittest.TestCase):
@@ -164,6 +323,10 @@ class ConfigModuleTest(unittest.TestCase):
                 "interrupt_probability": True,
                 "interrupt_texts": (" 打断甲 ", "", 1),
                 "interrupt_default_enabled": "yes",
+                "intelligent_interrupt_enabled": "yes",
+                "intelligent_interrupt_provider_id": 1,
+                "intelligent_interrupt_model": [],
+                "intelligent_interrupt_prompt": "   ",
                 "interrupt_mute_enabled": 0,
                 "interrupt_mute_duration_min": 60,
                 "interrupt_mute_duration_max": 30,
@@ -181,6 +344,13 @@ class ConfigModuleTest(unittest.TestCase):
         self.assertEqual(settings.interrupt_probability, 0.1)
         self.assertEqual(settings.interrupt_texts, ("打断甲",))
         self.assertTrue(settings.interrupt_default_enabled)
+        self.assertFalse(settings.intelligent_interrupt_enabled)
+        self.assertEqual(settings.intelligent_interrupt_provider_id, "")
+        self.assertEqual(settings.intelligent_interrupt_model, "")
+        self.assertEqual(
+            settings.intelligent_interrupt_prompt,
+            DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+        )
         self.assertFalse(settings.interrupt_mute_enabled)
         self.assertEqual(settings.interrupt_mute_duration_min, 60)
         self.assertEqual(settings.interrupt_mute_duration_max, 60)
@@ -195,6 +365,10 @@ class ConfigModuleTest(unittest.TestCase):
                 "[repeater] default_enabled 非法(1)，回退为 True",
                 "[repeater] interrupt_probability 非法(True)，回退为 0.1",
                 "[repeater] interrupt_default_enabled 非法(yes)，回退为 True",
+                "[repeater] intelligent_interrupt_enabled 非法(yes)，回退为 False",
+                "[repeater] intelligent_interrupt_provider_id 非法(1)，回退为空字符串",
+                "[repeater] intelligent_interrupt_model 非法([])，回退为空字符串",
+                "[repeater] intelligent_interrupt_prompt 非法或为空，回退为默认智能打断提示词",
                 "[repeater] interrupt_mute_enabled 非法(0)，回退为 False",
                 "[repeater] interrupt_mute_duration_max 小于 "
                 "interrupt_mute_duration_min，使用下限值",
@@ -210,6 +384,59 @@ class FakeBot:
 
     async def call_action(self, action: str, **payload: object) -> None:
         self.actions.append((action, payload))
+
+
+class FakeContext:
+    def __init__(
+        self,
+        *,
+        provider_id: str = "current-provider",
+        response: LLMResponse | None = None,
+        provider_error: BaseException | None = None,
+        llm_error: BaseException | None = None,
+        before_error: Callable[[], None] | None = None,
+    ) -> None:
+        self.provider_id = provider_id
+        self.response = (
+            response
+            if response is not None
+            else LLMResponse("assistant", completion_text="智能打断")
+        )
+        self.provider_error = provider_error
+        self.llm_error = llm_error
+        self.before_error = before_error
+        self.provider_calls: list[str] = []
+        self.llm_calls: list[dict[str, object]] = []
+
+    def get_current_chat_provider_id(self, umo: str) -> str:
+        self.provider_calls.append(umo)
+        if self.provider_error is not None:
+            if self.before_error is not None:
+                self.before_error()
+            raise self.provider_error
+        return self.provider_id
+
+    async def llm_generate(
+        self,
+        *,
+        chat_provider_id: str,
+        prompt: str | None = None,
+        system_prompt: str | None = None,
+        **kwargs: object,
+    ) -> LLMResponse:
+        self.llm_calls.append(
+            {
+                "chat_provider_id": chat_provider_id,
+                "prompt": prompt,
+                "system_prompt": system_prompt,
+                "kwargs": kwargs,
+            },
+        )
+        if self.llm_error is not None:
+            if self.before_error is not None:
+                self.before_error()
+            raise self.llm_error
+        return self.response
 
 
 class FakeEvent:
@@ -233,6 +460,7 @@ class FakeEvent:
         self_id: str | None = None,
     ) -> None:
         self.group_id = group_id
+        self.unified_msg_origin = f"onebot:group:{group_id}"
         self.sender_id = sender_id
         self.text = text
         self.is_at_or_wake_command = wake
@@ -381,6 +609,7 @@ class MemoryRepeater(RepeaterPlugin):
         config: dict | None = None,
         *,
         put_delay: float = 0,
+        context: object | None = None,
     ) -> None:
         defaults = {
             "default_enabled": True,
@@ -396,7 +625,7 @@ class MemoryRepeater(RepeaterPlugin):
             effective_config = defaults
             if config is not None:
                 effective_config.update(config)
-        super().__init__(None, effective_config)
+        super().__init__(context, effective_config)
         self.store = store
         self.put_delay = put_delay
         self.fail_next_put = False
@@ -501,6 +730,10 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
             interrupt_probability=0.0,
             interrupt_texts=("打断！",),
             interrupt_default_enabled=False,
+            intelligent_interrupt_enabled=False,
+            intelligent_interrupt_provider_id="",
+            intelligent_interrupt_model="",
+            intelligent_interrupt_prompt=DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
             interrupt_mute_enabled=False,
             interrupt_mute_duration_min=1,
             interrupt_mute_duration_max=15,
@@ -566,6 +799,15 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             plugin.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
         )
         self.assertEqual(len(plugin.state_service.settings.interrupt_texts), 1)
+        self.assertFalse(plugin.state_service.settings.intelligent_interrupt_enabled)
+        self.assertEqual(
+            plugin.state_service.settings.intelligent_interrupt_provider_id, ""
+        )
+        self.assertEqual(plugin.state_service.settings.intelligent_interrupt_model, "")
+        self.assertEqual(
+            plugin.state_service.settings.intelligent_interrupt_prompt,
+            DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+        )
 
         invalid = RepeaterPlugin(
             None,
@@ -592,6 +834,23 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             custom.state_service.settings.interrupt_texts, ("第一条", "第二条")
+        )
+
+        intelligent = RepeaterPlugin(
+            None,
+            {
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": " provider-a ",
+                "intelligent_interrupt_model": " model-b ",
+                "intelligent_interrupt_prompt": "   ",
+            },
+        ).state_service.settings
+        self.assertTrue(intelligent.intelligent_interrupt_enabled)
+        self.assertEqual(intelligent.intelligent_interrupt_provider_id, "provider-a")
+        self.assertEqual(intelligent.intelligent_interrupt_model, "model-b")
+        self.assertEqual(
+            intelligent.intelligent_interrupt_prompt,
+            DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         )
 
     def test_interrupt_mute_config_validates_and_persists_groups(self) -> None:
@@ -948,6 +1207,523 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             make_fingerprint("原始复读内容"),
             plugin.state_service.group_states["interrupt"].repeated_fingerprints,
         )
+
+    async def test_intelligent_interrupt_uses_llm_text_once(self) -> None:
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="机智打断"),
+        )
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+                "intelligent_interrupt_model": "model-b",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        first = FakeEvent("intelligent-success", "A", "原始复读内容", "1")
+        triggering_event = FakeEvent(
+            "intelligent-success",
+            "B",
+            "原始复读内容",
+            "2",
+        )
+
+        await plugin.on_group_message(first)
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["机智打断"])
+        self.assertTrue(triggering_event.stopped)
+        self.assertEqual(context.provider_calls, [])
+        self.assertEqual(
+            context.llm_calls,
+            [
+                {
+                    "chat_provider_id": "provider-a",
+                    "prompt": "被复读的内容：原始复读内容",
+                    "system_prompt": DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+                    "kwargs": {"model": "model-b"},
+                },
+            ],
+        )
+        fingerprint = make_fingerprint("原始复读内容")
+        state = plugin.state_service.group_states["intelligent-success"]
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+
+    async def test_intelligent_interrupt_uses_current_provider_and_default_model(
+        self,
+    ) -> None:
+        context = FakeContext(
+            provider_id="session-provider",
+            response=LLMResponse("assistant", completion_text="会话打断"),
+        )
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-current-provider", "A", "会话内容", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-current-provider",
+            "B",
+            "会话内容",
+            "2",
+        )
+
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["会话打断"])
+        self.assertEqual(
+            context.provider_calls,
+            [triggering_event.unified_msg_origin],
+        )
+        self.assertEqual(context.llm_calls[0]["chat_provider_id"], "session-provider")
+        self.assertNotIn("model", context.llm_calls[0]["kwargs"])
+
+    async def test_intelligent_interrupt_awaits_current_provider_resolution(
+        self,
+    ) -> None:
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="异步供应商打断"),
+        )
+
+        async def resolve_current_provider(umo: str) -> str:
+            context.provider_calls.append(umo)
+            return "async-provider"
+
+        context.get_current_chat_provider_id = resolve_current_provider
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-async-provider", "A", "异步内容", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-async-provider",
+            "B",
+            "异步内容",
+            "2",
+        )
+
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["异步供应商打断"])
+        self.assertEqual(
+            context.provider_calls,
+            [triggering_event.unified_msg_origin],
+        )
+        self.assertEqual(context.llm_calls[0]["chat_provider_id"], "async-provider")
+        self.assertNotIn("model", context.llm_calls[0]["kwargs"])
+
+    async def test_disabled_intelligent_interrupt_does_not_use_context(self) -> None:
+        context = FakeContext()
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": False,
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-disabled", "A", "关闭智能", "1"),
+        )
+        triggering_event = FakeEvent("intelligent-disabled", "B", "关闭智能", "2")
+
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["随机后备"])
+        self.assertEqual(context.provider_calls, [])
+        self.assertEqual(context.llm_calls, [])
+
+    async def test_intelligent_interrupt_falls_back_when_provider_resolution_fails(
+        self,
+    ) -> None:
+        context = FakeContext(provider_error=RuntimeError("provider unavailable"))
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-provider-error", "A", "供应商失败", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-provider-error",
+            "B",
+            "供应商失败",
+            "2",
+        )
+
+        await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("供应商失败")
+        state = plugin.state_service.group_states["intelligent-provider-error"]
+        self.assertEqual(triggering_event.sent, ["随机后备"])
+        self.assertTrue(triggering_event.stopped)
+        self.assertEqual(context.provider_calls, [triggering_event.unified_msg_origin])
+        self.assertEqual(context.llm_calls, [])
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+        self.assertNotIn(
+            fingerprint,
+            store["group_states"]["intelligent-provider-error"]["pending_fingerprints"],
+        )
+
+    async def test_intelligent_interrupt_falls_back_when_llm_fails(self) -> None:
+        context = FakeContext(llm_error=RuntimeError("LLM unavailable"))
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-llm-error", "A", "模型失败", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-llm-error",
+            "B",
+            "模型失败",
+            "2",
+        )
+
+        await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("模型失败")
+        state = plugin.state_service.group_states["intelligent-llm-error"]
+        self.assertEqual(triggering_event.sent, ["随机后备"])
+        self.assertTrue(triggering_event.stopped)
+        self.assertEqual(context.provider_calls, [])
+        self.assertEqual(len(context.llm_calls), 1)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+
+    async def test_intelligent_interrupt_falls_back_on_empty_completion(self) -> None:
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="   "),
+        )
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-empty", "A", "空响应", "1"),
+        )
+        triggering_event = FakeEvent("intelligent-empty", "B", "空响应", "2")
+
+        await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("空响应")
+        state = plugin.state_service.group_states["intelligent-empty"]
+        self.assertEqual(triggering_event.sent, ["随机后备"])
+        self.assertTrue(triggering_event.stopped)
+        self.assertEqual(len(context.llm_calls), 1)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+
+    async def test_intelligent_interrupt_falls_back_on_error_response(self) -> None:
+        context = FakeContext(
+            response=LLMResponse("err", completion_text="provider failure"),
+        )
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-error-response", "A", "错误响应", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-error-response",
+            "B",
+            "错误响应",
+            "2",
+        )
+
+        await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("错误响应")
+        state = plugin.state_service.group_states["intelligent-error-response"]
+        self.assertEqual(triggering_event.sent, ["随机后备"])
+        self.assertTrue(triggering_event.stopped)
+        self.assertEqual(len(context.llm_calls), 1)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+
+    async def test_intelligent_interrupt_send_failure_rolls_back_and_retries(
+        self,
+    ) -> None:
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="机智打断"),
+        )
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-retry", "A", "发送重试", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-retry",
+            "B",
+            "发送重试",
+            "2",
+            fail_send=True,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "send failed"):
+            await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("发送重试")
+        state = plugin.state_service.group_states["intelligent-retry"]
+        self.assertFalse(triggering_event.sent)
+        self.assertNotIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+        self.assertEqual(state.last_message_id, "1")
+        self.assertEqual(
+            store["group_states"]["intelligent-retry"]["last_message_id"],
+            "1",
+        )
+
+        triggering_event.fail_send = False
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["机智打断"])
+        self.assertEqual(len(context.llm_calls), 2)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+
+    async def test_intelligent_interrupt_cancellation_rolls_back_before_send(
+        self,
+    ) -> None:
+        context = FakeContext(llm_error=asyncio.CancelledError())
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-cancel", "A", "取消生成", "1"),
+        )
+        triggering_event = FakeEvent("intelligent-cancel", "B", "取消生成", "2")
+
+        with self.assertRaises(asyncio.CancelledError):
+            await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("取消生成")
+        state = plugin.state_service.group_states["intelligent-cancel"]
+        self.assertFalse(triggering_event.sent)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+        self.assertNotIn(fingerprint, state.repeated_fingerprints)
+        self.assertEqual(state.last_message_id, "1")
+        self.assertNotIn(
+            fingerprint,
+            store["group_states"]["intelligent-cancel"]["pending_fingerprints"],
+        )
+
+        context.llm_error = None
+        context.response = LLMResponse("assistant", completion_text="恢复生成")
+        await plugin.on_group_message(triggering_event)
+
+        self.assertEqual(triggering_event.sent, ["恢复生成"])
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+
+    async def test_intelligent_interrupt_cancellation_keeps_pending_when_rollback_fails(
+        self,
+    ) -> None:
+        context = FakeContext(llm_error=asyncio.CancelledError())
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        context.before_error = lambda: setattr(plugin, "fail_next_put", True)
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-cancel-rollback", "A", "取消回滚", "1"),
+        )
+        triggering_event = FakeEvent(
+            "intelligent-cancel-rollback",
+            "B",
+            "取消回滚",
+            "2",
+        )
+
+        with patch("main.logger.exception") as exception_logger:
+            with self.assertRaises(asyncio.CancelledError):
+                await plugin.on_group_message(triggering_event)
+
+        fingerprint = make_fingerprint("取消回滚")
+        state = plugin.state_service.group_states["intelligent-cancel-rollback"]
+        self.assertFalse(triggering_event.sent)
+        self.assertIn(fingerprint, state.pending_fingerprints)
+        self.assertIn(
+            fingerprint,
+            store["group_states"]["intelligent-cancel-rollback"][
+                "pending_fingerprints"
+            ],
+        )
+        self.assertEqual(state.last_message_id, "2")
+        self.assertEqual(
+            store["group_states"]["intelligent-cancel-rollback"]["last_message_id"],
+            "2",
+        )
+        exception_logger.assert_called_once()
+        self.assertIn("回滚保存失败", exception_logger.call_args.args[0])
+
+        suppressed_event = FakeEvent(
+            "intelligent-cancel-rollback",
+            "C",
+            "取消回滚",
+            "3",
+        )
+        await plugin.on_group_message(suppressed_event)
+        self.assertFalse(suppressed_event.sent)
+
+    async def test_intelligent_interrupt_send_cancellation_keeps_pending(self) -> None:
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="等待发送"),
+        )
+        store: dict = {}
+        plugin = MemoryRepeater(
+            store,
+            {
+                "repeat_threshold": 2,
+                "interrupt_default_enabled": True,
+                "interrupt_probability": 1.0,
+                "interrupt_texts": ["随机后备"],
+                "intelligent_interrupt_enabled": True,
+                "intelligent_interrupt_provider_id": "provider-a",
+            },
+            context=context,
+        )
+        await plugin.initialize()
+        await plugin.on_group_message(
+            FakeEvent("intelligent-send-cancel", "A", "发送取消", "1"),
+        )
+        triggering_event = DelayedEvent(
+            "intelligent-send-cancel",
+            "B",
+            "发送取消",
+            "2",
+        )
+        handler_task = asyncio.create_task(plugin.on_group_message(triggering_event))
+        await triggering_event.send_started.wait()
+
+        handler_task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await handler_task
+
+        fingerprint = make_fingerprint("发送取消")
+        state = plugin.state_service.group_states["intelligent-send-cancel"]
+        self.assertFalse(triggering_event.sent)
+        self.assertFalse(triggering_event.stopped)
+        self.assertIn(fingerprint, state.pending_fingerprints)
+        self.assertIn(
+            fingerprint,
+            store["group_states"]["intelligent-send-cancel"]["pending_fingerprints"],
+        )
+        self.assertEqual(state.last_message_id, "2")
+
+        suppressed_event = FakeEvent(
+            "intelligent-send-cancel",
+            "C",
+            "发送取消",
+            "3",
+        )
+        await plugin.on_group_message(suppressed_event)
+        self.assertFalse(suppressed_event.sent)
+        self.assertEqual(len(context.llm_calls), 1)
 
     async def test_interrupt_miss_falls_through_to_normal_repeat(self) -> None:
         plugin = MemoryRepeater(
