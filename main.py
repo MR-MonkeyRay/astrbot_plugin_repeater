@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import inspect
 import random
 
 from astrbot.api import logger
@@ -13,11 +14,11 @@ from astrbot.api.star import Context, Star
 
 if __package__:
     from .repeater_config import build_settings
-    from .repeater_messages import repeatable_message
+    from .repeater_messages import RepeatableMessage, repeatable_message
     from .repeater_service import RepeatAttempt, RepeaterStateService
 else:
     from repeater_config import build_settings
-    from repeater_messages import repeatable_message
+    from repeater_messages import RepeatableMessage, repeatable_message
     from repeater_service import RepeatAttempt, RepeaterStateService
 
 
@@ -191,11 +192,44 @@ class RepeaterPlugin(Star):
         if attempt is None:
             return
 
-        result = (
-            event.chain_result(list(attempt.response_chain))
-            if attempt.response_chain
-            else event.plain_result(attempt.response_text)
-        )
+        response_text = attempt.response_text
+        if (
+            attempt.interrupted
+            and self.state_service.settings.intelligent_interrupt_enabled
+        ):
+            try:
+                response_text = await self._generate_intelligent_interrupt(
+                    event,
+                    message,
+                    attempt.response_text,
+                )
+            except asyncio.CancelledError:
+                try:
+                    await self.state_service.rollback_attempt(group_key, attempt)
+                except asyncio.CancelledError:
+                    logger.exception(
+                        f"[repeater] {group_key} 智能打断生成取消，回滚保存也被取消；"
+                        "已保留 pending 抑制",
+                    )
+                except Exception:
+                    logger.exception(
+                        f"[repeater] {group_key} 智能打断生成取消，回滚保存失败；"
+                        "已保留 pending 抑制",
+                    )
+                else:
+                    logger.info(
+                        f"[repeater] {group_key} 智能打断生成取消，状态已回滚",
+                    )
+                raise
+
+        if attempt.interrupted:
+            result = event.plain_result(response_text)
+        else:
+            result = (
+                event.chain_result(list(attempt.response_chain))
+                if attempt.response_chain
+                else event.plain_result(response_text)
+            )
         try:
             await event.send(result)
         except Exception:
@@ -214,10 +248,51 @@ class RepeaterPlugin(Star):
         await self.state_service.commit_attempt(group_key, attempt)
         action = "打断复读" if attempt.interrupted else "复读"
         logger.info(
-            f"[repeater] {group_key} 触发{action}: {attempt.response_text[:20]}",
+            f"[repeater] {group_key} 触发{action}: {response_text[:20]}",
         )
         if attempt.interrupted:
             await self._handle_interrupt_mute(event, group_key, attempt)
+
+    async def _generate_intelligent_interrupt(
+        self,
+        event: AstrMessageEvent,
+        message: RepeatableMessage,
+        fallback_text: str,
+    ) -> str:
+        """生成智能打断文本；生成失败时返回既有随机后备文本。"""
+        settings = self.state_service.settings
+        try:
+            chat_provider_id = settings.intelligent_interrupt_provider_id
+            if not chat_provider_id:
+                current_provider_id = self.context.get_current_chat_provider_id(
+                    event.unified_msg_origin,
+                )
+                if inspect.isawaitable(current_provider_id):
+                    chat_provider_id = await current_provider_id
+                else:
+                    chat_provider_id = current_provider_id
+            model_kwargs = (
+                {"model": settings.intelligent_interrupt_model}
+                if settings.intelligent_interrupt_model
+                else {}
+            )
+            response = await self.context.llm_generate(
+                chat_provider_id=chat_provider_id,
+                prompt=f"被复读的内容：{message.text or message.summary}",
+                system_prompt=settings.intelligent_interrupt_prompt,
+                **model_kwargs,
+            )
+            if response.role != "assistant":
+                raise ValueError(f"unexpected LLM response role: {response.role!r}")
+            completion_text = (response.completion_text or "").strip()
+            if not completion_text:
+                raise ValueError("empty LLM completion")
+            return completion_text
+        except Exception as exc:
+            logger.warning(
+                f"[repeater] {self._group_key(event)} 智能打断生成失败: {exc}",
+            )
+            return fallback_text
 
     async def _handle_interrupt_mute(
         self,

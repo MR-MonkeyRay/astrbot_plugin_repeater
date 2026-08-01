@@ -6,6 +6,10 @@ from typing import Any
 
 DEFAULT_INTERRUPT_TEXT = "打断！"
 DEFAULT_INTERRUPT_MUTE_TEXT = "用户{user}因命中打断复读禁言策略而被禁言{time}s"
+DEFAULT_INTELLIGENT_INTERRUPT_PROMPT = (
+    "你是友善、机智的群聊复读打断助手。根据用户反复发送的内容，只生成一条简短、有趣、适合群聊的打断语。"
+    "可以复读、打乱顺序或合理开玩笑；不得辱骂、歧视、威胁、露骨或攻击个人。不要解释、不要加引号、不要输出前缀。"
+)
 
 
 @dataclass(slots=True)
@@ -22,6 +26,10 @@ class RepeaterSettings:
     interrupt_probability: float
     interrupt_texts: tuple[str, ...]
     interrupt_default_enabled: bool
+    intelligent_interrupt_enabled: bool
+    intelligent_interrupt_provider_id: str
+    intelligent_interrupt_model: str
+    intelligent_interrupt_prompt: str
     interrupt_mute_enabled: bool
     interrupt_mute_duration_min: int
     interrupt_mute_duration_max: int
@@ -88,6 +96,31 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         True,
         logger,
     )
+    intelligent_interrupt_enabled = _validated_bool(
+        config.get("intelligent_interrupt_enabled", False),
+        "intelligent_interrupt_enabled",
+        False,
+        logger,
+    )
+    intelligent_interrupt_provider_id = _validated_optional_text(
+        config.get("intelligent_interrupt_provider_id", ""),
+        "intelligent_interrupt_provider_id",
+        logger,
+    )
+    intelligent_interrupt_model = _validated_optional_text(
+        config.get("intelligent_interrupt_model", ""),
+        "intelligent_interrupt_model",
+        logger,
+    )
+    intelligent_interrupt_prompt = _validated_required_text(
+        config.get(
+            "intelligent_interrupt_prompt",
+            DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+        ),
+        "intelligent_interrupt_prompt",
+        DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
+        logger,
+    )
     interrupt_mute_enabled = _validated_bool(
         config.get("interrupt_mute_enabled", False),
         "interrupt_mute_enabled",
@@ -136,6 +169,10 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         interrupt_probability=interrupt_probability,
         interrupt_texts=interrupt_texts,
         interrupt_default_enabled=interrupt_default_enabled,
+        intelligent_interrupt_enabled=intelligent_interrupt_enabled,
+        intelligent_interrupt_provider_id=intelligent_interrupt_provider_id,
+        intelligent_interrupt_model=intelligent_interrupt_model,
+        intelligent_interrupt_prompt=intelligent_interrupt_prompt,
         interrupt_mute_enabled=interrupt_mute_enabled,
         interrupt_mute_duration_min=duration_min,
         interrupt_mute_duration_max=duration_max,
@@ -170,6 +207,24 @@ def _validated_bool(value: Any, field_name: str, default: bool, logger: Any) -> 
     if isinstance(value, bool):
         return value
     logger.warning(f"[repeater] {field_name} 非法({value})，回退为 {default}")
+    return default
+
+
+def _validated_optional_text(value: Any, field_name: str, logger: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    logger.warning(f"[repeater] {field_name} 非法({value})，回退为空字符串")
+    return ""
+
+
+def _validated_required_text(
+    value: Any, field_name: str, default: str, logger: Any
+) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+    logger.warning(f"[repeater] {field_name} 非法或为空，回退为默认智能打断提示词")
     return default
 
 
