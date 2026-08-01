@@ -1,0 +1,118 @@
+{
+  "pages": {
+    "intelligent-console": {
+      "title": "智能文案测试",
+      "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
+      "heading": "智能文案测试",
+      "intro": "保存共享供应商与模型，执行无副作用的文案测试，并查看七日内记录。",
+      "configuration": {
+        "kicker": "共享配置",
+        "title": "供应商与模型",
+        "provider": {
+          "label": "聊天供应商",
+          "empty": "留空：跟随触发会话",
+          "help": "留空会跟随触发群消息的会话；该模式不能从页面执行测试。"
+        },
+        "model": {
+          "label": "模型 ID",
+          "placeholder": "留空使用供应商默认模型",
+          "help": "从候选列表选择，或输入未枚举的自定义模型 ID。",
+          "loading": "正在读取模型候选…",
+          "unavailable": "模型候选暂不可用，仍可手动输入模型 ID。"
+        },
+        "save": "保存配置",
+        "saved": "配置已保存。",
+        "saving": "正在保存…"
+      },
+      "runtime": {
+        "repeat_on": "智能复读：运行中",
+        "repeat_off": "智能复读：已关闭",
+        "mute_on": "智能禁言提示：运行中",
+        "mute_off": "智能禁言提示：已关闭"
+      },
+      "tests": {
+        "repeat": {
+          "kicker": "固定模拟输入",
+          "title": "智能复读文案测试",
+          "description": "使用保存的智能打断提示词生成一条测试文案，不会发送群消息。",
+          "action": "测试智能复读"
+        },
+        "mute": {
+          "kicker": "固定模拟输入",
+          "title": "智能禁言提示测试",
+          "description": "使用“测试用户 / 60 秒”生成提示文案，不会禁言、发送消息或改变群状态。",
+          "action": "测试智能禁言"
+        },
+        "running": "正在生成测试文案…",
+        "result": "{provider} · {model} · {latency} ms\n{text}",
+        "failed": "测试失败：{message}"
+      },
+      "history": {
+        "kicker": "仅保留运行元数据",
+        "title": "智能文案记录",
+        "windows": {
+          "day": "当天",
+          "24h": "24H",
+          "2d": "2天",
+          "3d": "3天",
+          "7d": "7天"
+        },
+        "filter": {
+          "label": "类型",
+          "all": "全部",
+          "repeat": "智能复读",
+          "mute": "智能禁言"
+        },
+        "summary": {
+          "total": "总计",
+          "repeat": "复读",
+          "mute": "禁言",
+          "success": "成功",
+          "fallback": "后备",
+          "failed": "失败"
+        },
+        "table": {
+          "time": "时间",
+          "source": "来源",
+          "action": "动作",
+          "outcome": "结果",
+          "provider": "供应商 / 模型",
+          "context": "群 / 时长",
+          "latency": "耗时"
+        },
+        "source": {
+          "runtime": "运行时",
+          "manual_test": "手动测试"
+        },
+        "action": {
+          "repeat": "智能复读",
+          "mute": "智能禁言"
+        },
+        "outcome": {
+          "success": "成功",
+          "fallback": "后备",
+          "failed": "失败"
+        },
+        "range": "{start} — {end}（{timezone}）",
+        "loading": "正在读取记录…",
+        "unavailable": "智能记录存储不可用。",
+        "empty": "这个时间范围内还没有记录。",
+        "pagination": {
+          "previous": "上一页",
+          "next": "下一页",
+          "page": "第 {page} / {total} 页"
+        },
+        "privacy": "记录不会保存群聊原文、生成结果、发送者标识、异常详情或任何凭据；超过七天的数据会在后台清理。",
+        "group": "群 {group}",
+        "duration": "禁言 {duration} 秒",
+        "not_available": "—"
+      },
+      "common": {
+        "loading": "正在加载…",
+        "provider_unavailable": "聊天供应商列表暂不可用。",
+        "configuration_not_loaded": "请先成功加载已保存的配置，再进行保存。",
+        "unknown_error": "操作失败，请稍后重试。"
+      }
+    }
+  }
+}

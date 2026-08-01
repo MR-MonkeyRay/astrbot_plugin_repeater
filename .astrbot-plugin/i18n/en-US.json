@@ -1,0 +1,118 @@
+{
+  "pages": {
+    "intelligent-console": {
+      "title": "Intelligent Copy Test",
+      "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
+      "heading": "Intelligent Copy Test",
+      "intro": "Save the shared provider and model, run non-destructive copy tests, and inspect seven days of records.",
+      "configuration": {
+        "kicker": "Shared configuration",
+        "title": "Provider and model",
+        "provider": {
+          "label": "Chat provider",
+          "empty": "Blank: follow triggering session",
+          "help": "A blank provider follows the triggering group-message session and cannot be tested from this page."
+        },
+        "model": {
+          "label": "Model ID",
+          "placeholder": "Blank uses the provider default model",
+          "help": "Choose a candidate or enter a custom model ID that was not enumerated.",
+          "loading": "Loading model candidates…",
+          "unavailable": "Model candidates are unavailable; a custom model ID can still be entered."
+        },
+        "save": "Save configuration",
+        "saved": "Configuration saved.",
+        "saving": "Saving…"
+      },
+      "runtime": {
+        "repeat_on": "Intelligent repeat: active",
+        "repeat_off": "Intelligent repeat: off",
+        "mute_on": "Intelligent mute notice: active",
+        "mute_off": "Intelligent mute notice: off"
+      },
+      "tests": {
+        "repeat": {
+          "kicker": "Fixed simulated input",
+          "title": "Intelligent repeat copy test",
+          "description": "Generates one test copy with the saved interrupt prompt. No group message is sent.",
+          "action": "Test intelligent repeat"
+        },
+        "mute": {
+          "kicker": "Fixed simulated input",
+          "title": "Intelligent mute notice test",
+          "description": "Generates copy for “Test user / 60 seconds”. It never mutes, sends a message, or changes group state.",
+          "action": "Test intelligent mute"
+        },
+        "running": "Generating test copy…",
+        "result": "{provider} · {model} · {latency} ms\n{text}",
+        "failed": "Test failed: {message}"
+      },
+      "history": {
+        "kicker": "Operational metadata only",
+        "title": "Intelligent copy records",
+        "windows": {
+          "day": "Today",
+          "24h": "24H",
+          "2d": "2 days",
+          "3d": "3 days",
+          "7d": "7 days"
+        },
+        "filter": {
+          "label": "Type",
+          "all": "All",
+          "repeat": "Intelligent repeat",
+          "mute": "Intelligent mute"
+        },
+        "summary": {
+          "total": "Total",
+          "repeat": "Repeat",
+          "mute": "Mute",
+          "success": "Success",
+          "fallback": "Fallback",
+          "failed": "Failed"
+        },
+        "table": {
+          "time": "Time",
+          "source": "Source",
+          "action": "Action",
+          "outcome": "Outcome",
+          "provider": "Provider / model",
+          "context": "Group / duration",
+          "latency": "Latency"
+        },
+        "source": {
+          "runtime": "Runtime",
+          "manual_test": "Manual test"
+        },
+        "action": {
+          "repeat": "Intelligent repeat",
+          "mute": "Intelligent mute"
+        },
+        "outcome": {
+          "success": "Success",
+          "fallback": "Fallback",
+          "failed": "Failed"
+        },
+        "range": "{start} — {end} ({timezone})",
+        "loading": "Loading records…",
+        "unavailable": "Intelligent record storage is unavailable.",
+        "empty": "There are no records in this time range.",
+        "pagination": {
+          "previous": "Previous",
+          "next": "Next",
+          "page": "Page {page} / {total}"
+        },
+        "privacy": "Records never retain group text, generated copy, sender identifiers, exception details, or credentials. Data older than seven days is cleaned in the background.",
+        "group": "Group {group}",
+        "duration": "Muted {duration} s",
+        "not_available": "—"
+      },
+      "common": {
+        "loading": "Loading…",
+        "provider_unavailable": "The chat-provider list is unavailable.",
+        "configuration_not_loaded": "Load the saved configuration before saving changes.",
+        "unknown_error": "The operation failed. Please try again later."
+      }
+    }
+  }
+}
