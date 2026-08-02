@@ -789,7 +789,7 @@ class RepeaterPlugin(Star):
                 and result.result_code == "provider_resolution_failed"
             ):
                 return error_response(
-                    "OpenAI-compatible 直连模式需要保存 API Base URL、API Key 和模型。",
+                    "自定义 OpenAI兼容直连模式需要保存 API Base URL、API Key 和模型。",
                     status_code=409,
                     data={"code": result.result_code},
                 )

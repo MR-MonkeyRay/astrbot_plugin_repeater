@@ -36,7 +36,7 @@
             <span data-i18n="configuration.mode.label">生成路由</span>
             <select id="provider-mode" aria-describedby="provider-mode-help" disabled>
               <option value="astrbot" data-i18n="configuration.mode.astrbot">AstrBot 聊天供应商</option>
-              <option value="openai_compatible" data-i18n="configuration.mode.openai_compatible">OpenAI-compatible 直连</option>
+              <option value="openai_compatible" data-i18n="configuration.mode.openai_compatible">自定义 OpenAI兼容直连</option>
             </select>
             <small id="provider-mode-help" data-i18n="configuration.mode.astrbot_help">
               使用 AstrBot 已配置的聊天供应商；留空供应商会跟随触发会话。
@@ -61,7 +61,7 @@
               disabled
             />
             <small data-i18n="configuration.manual_api_base.help">
-              填写兼容服务的根路径（可含版本路径）。
+              仅自定义 OpenAI兼容直连模式使用。填写兼容服务的根路径（可含版本路径）。
             </small>
           </label>
           <div class="field" id="manual-api-key-field" hidden>
@@ -83,7 +83,7 @@
               </button>
             </div>
             <small id="manual-api-key-help" data-i18n="configuration.manual_api_key.help">
-              仅直连模式使用；保存后页面不会回显 Key。
+              仅自定义 OpenAI兼容直连模式使用；保存后页面不会回显 Key。
             </small>
           </div>
           <label class="field">
