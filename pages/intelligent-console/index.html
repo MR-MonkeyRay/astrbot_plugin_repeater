@@ -265,20 +265,24 @@
               aria-label="记录时间范围"
               data-i18n-aria-label="history.windows.label"
             >
-              <button class="range-tab is-active" data-window="day" type="button" aria-pressed="true" data-i18n="history.windows.day">当天</button>
-              <button class="range-tab" data-window="24h" type="button" aria-pressed="false" data-i18n="history.windows.24h">24H</button>
+              <button class="range-tab is-active" data-window="24h" type="button" aria-pressed="true" data-i18n="history.windows.24h">24H</button>
+
               <button class="range-tab" data-window="2d" type="button" aria-pressed="false" data-i18n="history.windows.2d">2天</button>
               <button class="range-tab" data-window="3d" type="button" aria-pressed="false" data-i18n="history.windows.3d">3天</button>
               <button class="range-tab" data-window="7d" type="button" aria-pressed="false" data-i18n="history.windows.7d">7天</button>
             </div>
-            <label class="inline-field" for="history-kind">
-              <span data-i18n="history.filter.label">类型</span>
-              <select id="history-kind">
-                <option value="all" data-i18n="history.filter.all">全部</option>
-                <option value="repeat" data-i18n="history.filter.repeat">智能打断</option>
-                <option value="mute" data-i18n="history.filter.mute">智能禁言</option>
-              </select>
-            </label>
+            <div class="history-actions">
+              <label class="inline-field" for="history-kind">
+                <span data-i18n="history.filter.label">类型</span>
+                <select id="history-kind">
+                  <option value="all" data-i18n="history.filter.all">全部</option>
+                  <option value="repeat" data-i18n="history.filter.repeat">智能打断</option>
+                  <option value="mute" data-i18n="history.filter.mute">智能禁言</option>
+                </select>
+              </label>
+              <button class="button button-warning" id="clear-history" type="button" data-i18n="history.clear.action">清理记录</button>
+            </div>
+
           </div>
 
           <div class="summary-grid" aria-label="记录汇总">
@@ -299,7 +303,8 @@
                   <th data-i18n="history.table.action">动作</th>
                   <th data-i18n="history.table.outcome">结果</th>
                   <th data-i18n="history.table.provider">供应商 / 模型</th>
-                  <th data-i18n="history.table.context">群 / 时长</th>
+                  <th data-i18n="history.table.context">群ID</th>
+
                   <th data-i18n="history.table.latency">耗时</th>
                 </tr>
               </thead>

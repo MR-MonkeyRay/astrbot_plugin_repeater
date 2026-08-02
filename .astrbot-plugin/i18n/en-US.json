@@ -85,7 +85,6 @@
         "title": "LLM call records",
         "windows": {
           "label": "Record time range",
-          "day": "Today",
           "24h": "24H",
           "2d": "2 days",
           "3d": "3 days",
@@ -111,7 +110,7 @@
           "action": "Action",
           "outcome": "Outcome",
           "provider": "Provider / model",
-          "context": "Group / duration",
+          "context": "Group ID",
           "latency": "Latency"
         },
         "source": {
@@ -137,13 +136,21 @@
           "next": "Next",
           "page": "Page {page} / {total}"
         },
+        "clear": {
+          "action": "Clear records",
+          "confirm": "Clear all LLM call records? This cannot be undone.",
+          "clearing": "Clearing records…",
+          "success": "Cleared {count} records."
+        },
         "detail": {
           "toggle": "Expand or collapse record details",
           "message_text": "Repeated content",
           "prompt": "LLM request",
           "completion": "LLM reply",
+          "mute_duration": "Mute duration",
           "repeat_user_count": "Repeat users"
         },
+
         "privacy": "Records retain repeated content, LLM requests, and replies for review here. Data older than seven days is cleaned in the background.",
         "group": "Group {group}",
         "duration": "Muted {duration} s",

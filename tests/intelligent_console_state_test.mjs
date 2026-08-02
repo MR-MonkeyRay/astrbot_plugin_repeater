@@ -75,6 +75,7 @@ const selectorLists = new Map([
   ["[data-i18n-placeholder]", []],
   ["[data-i18n-aria-label]", []],
   [".range-tab", []],
+
   [".route-tab", []],
   [".view-tab", []],
   [".workspace-view", []],
@@ -96,9 +97,13 @@ const testsView = new Element();
 testsView.id = "tests-view";
 const historyView = new Element();
 historyView.id = "history-view";
+const history24hTab = new Element();
+history24hTab.dataset.window = "24h";
+
 selectorLists.set(".route-tab", [astrbotRouteTab, manualRouteTab]);
 selectorLists.set(".view-tab", [configurationTab, testsTab, historyTab]);
 selectorLists.set(".workspace-view", [configurationView, testsView, historyView]);
+selectorLists.set(".range-tab", [history24hTab]);
 
 globalThis.document = {
   createElement: () => new Element(),
@@ -124,55 +129,73 @@ const configResponse = () => ({
   providers: [],
 });
 
+const historyRecords = [
+  {
+    id: 1,
+    occurred_at_ms: 0,
+    source: "runtime",
+    kind: "repeat",
+    outcome: "success",
+    provider_id: "provider-a",
+    model: "model-a",
+    group_id: "group-a",
+    latency_ms: 7,
+    message_text: "first repeated message",
+    prompt: "first prompt",
+    completion: "first reply",
+    repeat_user_count: 2,
+  },
+  {
+    id: 2,
+    occurred_at_ms: 1,
+    source: "runtime",
+    kind: "mute",
+    outcome: "success",
+    provider_id: "provider-b",
+    model: "model-b",
+    group_id: "group-b",
+    mute_duration_seconds: 60,
+    latency_ms: 8,
+    message_text: "second repeated message",
+    prompt: "second prompt",
+    completion: "second reply",
+    repeat_user_count: null,
+  },
+];
+const historyRequests = [];
+const historyClearPosts = [];
+let historyCleared = false;
+
 const configPosts = [];
 globalThis.window = {
   AstrBotPluginPage: {
-    apiGet: async (endpoint) => {
+    apiGet: async (endpoint, params) => {
+
       if (endpoint === "intelligent-console/config") {
         return configResponse();
       }
       if (endpoint === "intelligent-console/history") {
+        historyRequests.push(params);
         return {
-          pagination: { page: 1, total_pages: 1 },
+          pagination: {
+            page: params.page,
+            total_pages: historyCleared ? 1 : 2,
+          },
           range: null,
-          records: [
-            {
-              id: 1,
-              occurred_at_ms: 0,
-              source: "runtime",
-              kind: "repeat",
-              outcome: "success",
-              provider_id: "provider-a",
-              model: "model-a",
-              group_id: "group-a",
-              latency_ms: 7,
-              message_text: "first repeated message",
-              prompt: "first prompt",
-              completion: "first reply",
-              repeat_user_count: 2,
-            },
-            {
-              id: 2,
-              occurred_at_ms: 1,
-              source: "runtime",
-              kind: "repeat",
-              outcome: "success",
-              provider_id: "provider-b",
-              model: "model-b",
-              group_id: "group-b",
-              latency_ms: 8,
-              message_text: "second repeated message",
-              prompt: "second prompt",
-              completion: "second reply",
-              repeat_user_count: 3,
-            },
-          ],
+          records: historyCleared ? [] : historyRecords,
           summary: {},
         };
       }
+
       throw new Error(`Unexpected GET ${endpoint}`);
     },
     apiPost: async (endpoint, payload) => {
+      if (endpoint === "intelligent-console/history/clear") {
+        historyClearPosts.push(payload);
+        historyCleared = true;
+        return { deleted: 2 };
+      }
+
       if (endpoint === "intelligent-console/test/repeat") {
         return {
           latency_ms: 7,
@@ -205,6 +228,8 @@ const settle = async () => {
 const source = readFileSync("pages/intelligent-console/app.js", "utf8");
 eval(source);
 await settle();
+assert.equal(historyRequests[0].window, "24h");
+
 
 assert.equal(configurationView.hidden, false);
 assert.equal(testsView.hidden, true);
@@ -290,3 +315,23 @@ assert.equal(firstRow.attributes.get("aria-expanded"), "false");
 assert.equal(firstDetailRow.hidden, true);
 assert.equal(secondRow.attributes.get("aria-expanded"), "true");
 assert.equal(secondDetailRow.hidden, false);
+assert.equal(secondRow.children[5].textContent, "Group group-b");
+const muteDurationDetail = secondDetailRow.children[0].children[0].children[3];
+assert.equal(muteDurationDetail.children[0].textContent, "Mute duration");
+assert.equal(muteDurationDetail.children[1].textContent, "Muted 60 s");
+
+elementFor("#history-next").click();
+await settle();
+assert.equal(historyRequests[historyRequests.length - 1].page, 2);
+
+elementFor("#clear-history").click();
+await settle();
+assert.deepEqual(historyClearPosts, [{}]);
+assert.equal(historyRequests[historyRequests.length - 1].page, 1);
+assert.equal(elementFor("#history-page").textContent, "Page 1 / 1");
+assert.equal(elementFor("#history-prev").disabled, true);
+assert.equal(elementFor("#history-next").disabled, true);
+assert.equal(elementFor("#history-rows").children.length, 0);
+assert.equal(elementFor("#metric-total").textContent, "0");
+assert.equal(elementFor("#history-feedback").textContent, "Cleared 2 records.");
+assert.equal(elementFor("#clear-history").disabled, false);

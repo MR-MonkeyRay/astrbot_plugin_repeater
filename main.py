@@ -173,6 +173,12 @@ class RepeaterPlugin(Star):
             ["GET"],
             "读取智能文案生成记录",
         )
+        register_web_api(
+            f"{prefix}/history/clear",
+            track(self._web_clear_intelligent_history),
+            ["POST"],
+            "清理智能文案生成记录",
+        )
 
     def _track_intelligent_console_handler(self, handler):
         """Bind a Page request to the same shutdown drain as event handlers."""
@@ -849,7 +855,8 @@ class RepeaterPlugin(Star):
                 self._history_storage_error or "智能记录存储不可用。",
                 status_code=503,
             )
-        raw_window = request.query.get("window", "day")
+        raw_window = request.query.get("window", "24h")
+
         raw_kind = request.query.get("kind", "all")
         try:
             if raw_window not in {"day", "24h", "2d", "3d", "7d"}:
@@ -880,6 +887,25 @@ class RepeaterPlugin(Star):
             logger.exception("[repeater] 读取智能记录失败")
             return error_response("智能记录存储不可用。", status_code=503)
         return json_response({"status": "ok", "data": history_page.to_dict()})
+
+    async def _web_clear_intelligent_history(self):
+        """Delete all persisted intelligent-generation records."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        if not self._history_available:
+            return error_response(
+                self._history_storage_error or "智能记录存储不可用。",
+                status_code=503,
+            )
+        try:
+            deleted = await self.history_store.clear()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 清理智能记录失败")
+            return error_response("智能记录存储不可用。", status_code=503)
+        return json_response({"status": "ok", "data": {"deleted": deleted}})
 
     @staticmethod
     def _group_key(event: AstrMessageEvent) -> str:

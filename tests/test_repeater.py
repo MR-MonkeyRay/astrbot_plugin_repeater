@@ -3749,6 +3749,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                         (f"{prefix}/test/repeat", ("POST",)),
                         (f"{prefix}/test/mute", ("POST",)),
                         (f"{prefix}/history", ("GET",)),
+                        (f"{prefix}/history/clear", ("POST",)),
                     },
                 )
                 with patch("main.request", FakePageRequest()):
@@ -3812,6 +3813,54 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 await plugin.terminate()
             self.assertIsNotNone(cleanup_task)
             self.assertTrue(cleanup_task.cancelled())
+
+    async def test_history_clear_endpoint_removes_records(self) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = MemoryRepeater({}, context=FakePageContext())
+            store = IntelligentHistoryStore(
+                Path(directory) / "intelligent_history.sqlite3",
+                clock=lambda: now,
+            )
+            plugin.history_store = store
+            await plugin.initialize()
+            try:
+                for kind in ("repeat", "mute"):
+                    await store.append(
+                        IntelligentActionRecord(
+                            occurred_at_ms=int(now.timestamp() * 1000),
+                            kind=kind,
+                            source="runtime",
+                            outcome="success",
+                            provider_id="provider-a",
+                            model="model-a",
+                            group_id="group-a",
+                            mute_duration_seconds=60 if kind == "mute" else None,
+                            latency_ms=1,
+                        )
+                    )
+                with patch("main.request", FakePageRequest()):
+                    initial = response_payload(
+                        await plugin._web_get_intelligent_history()
+                    )
+                self.assertEqual(initial["data"]["range"]["window"], "24h")
+                self.assertEqual(initial["data"]["pagination"]["total"], 2)
+
+                with patch("main.request", FakePageRequest()):
+                    cleared = response_payload(
+                        await plugin._web_clear_intelligent_history()
+                    )
+                self.assertEqual(cleared["status"], "ok")
+                self.assertEqual(cleared["data"], {"deleted": 2})
+
+                with patch("main.request", FakePageRequest()):
+                    history = response_payload(
+                        await plugin._web_get_intelligent_history()
+                    )
+                self.assertEqual(history["data"]["summary"]["total"], 0)
+                self.assertEqual(history["data"]["records"], [])
+            finally:
+                await plugin.terminate()
 
     async def test_direct_config_bypasses_catalog_and_hides_api_key(self) -> None:
         class CatalogUnavailableContext(FakePageContext):

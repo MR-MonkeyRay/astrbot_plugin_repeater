@@ -13,7 +13,8 @@
     manualApiKeyClearRequested: false,
     configurationLoaded: false,
     history: {
-      window: "day",
+      window: "24h",
+
       kind: "all",
       page: 1,
       totalPages: 1,
@@ -48,6 +49,8 @@
     repeatResult: document.querySelector("#repeat-result"),
     muteResult: document.querySelector("#mute-result"),
     historyFeedback: document.querySelector("#history-feedback"),
+    clearHistory: document.querySelector("#clear-history"),
+
     historyRange: document.querySelector("#history-range"),
     historyKind: document.querySelector("#history-kind"),
     historyRows: document.querySelector("#history-rows"),
@@ -615,22 +618,12 @@
   }
 
   function contextLabel(record) {
-    const values = [];
-    if (record.group_id) {
-      values.push(
-        interpolate(translate("history.group", "Group {group}"), {
-          group: record.group_id,
-        }),
-      );
+    if (!record.group_id) {
+      return translate("history.not_available", "—");
     }
-    if (Number.isInteger(record.mute_duration_seconds)) {
-      values.push(
-        interpolate(translate("history.duration", "Muted {duration} s"), {
-          duration: record.mute_duration_seconds,
-        }),
-      );
-    }
-    return values.join(" · ") || translate("history.not_available", "—");
+    return interpolate(translate("history.group", "Group {group}"), {
+      group: record.group_id,
+    });
   }
 
   function appendCell(row, content, className = "") {
@@ -764,6 +757,16 @@
       );
       appendHistoryDetail(
         details,
+        "history.detail.mute_duration",
+        "Mute duration",
+        Number.isInteger(record.mute_duration_seconds)
+          ? interpolate(translate("history.duration", "Muted {duration} s"), {
+            duration: record.mute_duration_seconds,
+          })
+          : null,
+      );
+      appendHistoryDetail(
+        details,
         "history.detail.repeat_user_count",
         "Repeat users",
         record.repeat_user_count,
@@ -824,22 +827,59 @@
         page_size: 50,
       });
       if (requestId !== state.historyRequestId) {
-        return;
+        return false;
       }
       renderSummary(data.summary || {});
       renderHistoryRange(data.range);
       renderHistoryRows(Array.isArray(data.records) ? data.records : []);
       updatePagination(data.pagination || {});
       setFeedback(elements.historyFeedback);
+      return true;
     } catch (error) {
       if (requestId !== state.historyRequestId) {
-        return;
+        return false;
       }
       renderSummary({});
       renderHistoryRange(null);
       renderHistoryRows([]);
       updatePagination({ page: 1, total_pages: 1 });
       setFeedback(elements.historyFeedback, formatError(error), "error");
+      return false;
+    }
+  }
+
+  async function clearHistory() {
+    const confirmed = typeof window.confirm !== "function" || window.confirm(
+      translate(
+        "history.clear.confirm",
+        "Clear all LLM call records? This cannot be undone.",
+      ),
+    );
+    if (!confirmed) {
+      return;
+    }
+    elements.clearHistory.disabled = true;
+    setFeedback(
+      elements.historyFeedback,
+      translate("history.clear.clearing", "Clearing records…"),
+    );
+    try {
+      const data = await apiPost("intelligent-console/history/clear", {});
+      state.history.page = 1;
+      const refreshed = await loadHistory();
+      if (refreshed) {
+        setFeedback(
+          elements.historyFeedback,
+          interpolate(translate("history.clear.success", "Cleared {count} records."), {
+            count: Number(data?.deleted) || 0,
+          }),
+          "success",
+        );
+      }
+    } catch (error) {
+      setFeedback(elements.historyFeedback, formatError(error), "error");
+    } finally {
+      elements.clearHistory.disabled = false;
     }
   }
 
@@ -905,6 +945,10 @@
       }
     });
     elements.clearManualApiKey.addEventListener("click", clearManualApiKey);
+    elements.clearHistory.addEventListener("click", () => {
+      void clearHistory();
+    });
+
     elements.save.addEventListener("click", () => {
       void saveConfiguration();
     });

@@ -141,6 +141,12 @@ class IntelligentHistoryStore:
             id=record_id,
         )
 
+    async def clear(self) -> int:
+        """Delete every persisted intelligent action record."""
+        async with self._lock:
+            self._require_initialized()
+            return await self._run_sync(self._clear_sync)
+
     async def query(
         self,
         *,
@@ -476,6 +482,19 @@ class IntelligentHistoryStore:
             for row in rows
         ]
         return summary, records
+
+    def _clear_sync(self) -> int:
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute("DELETE FROM intelligent_action_history")
+            connection.commit()
+            return cursor.rowcount
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _purge_sync(self, cutoff_at_ms: int) -> int:
         connection = self._connect()

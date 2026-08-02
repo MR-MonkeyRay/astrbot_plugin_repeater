@@ -586,6 +586,14 @@ input::placeholder {
   border-bottom: 1px solid var(--line);
 }
 
+.history-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+
 .range-tabs {
   display: flex;
   flex-wrap: wrap;
