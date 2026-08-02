@@ -456,12 +456,12 @@ class RepeaterPlugin(Star):
         except Exception:
             logger.exception("[repeater] 读取智能文案模型列表失败")
             return error_response(
-                "无法读取模型列表，仍可手动输入模型 ID。",
+                "无法读取模型列表，仍可手动输入自定义模型 ID。",
                 status_code=503,
             )
         if not isinstance(models, (list, tuple, set)):
             return error_response(
-                "模型列表格式无效，仍可手动输入模型 ID。",
+                "模型列表格式无效，仍可手动输入自定义模型 ID。",
                 status_code=503,
             )
         model_ids = {
@@ -733,7 +733,7 @@ class RepeaterPlugin(Star):
         *,
         kind: Literal["repeat", "mute"],
     ):
-        """Run a fixed, non-destructive generation test for one intelligent feature."""
+        """Run a fixed generation test without group side effects."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
@@ -810,7 +810,7 @@ class RepeaterPlugin(Star):
                 and result.result_code == "provider_resolution_failed"
             ):
                 return error_response(
-                    "自定义 OpenAI兼容直连模式需要保存 API Base URL、API Key 和模型。",
+                    "OpenAI 兼容直连模式需要已保存的 API Base URL、API Key 和自定义模型 ID。",
                     status_code=409,
                     data={"code": result.result_code},
                 )

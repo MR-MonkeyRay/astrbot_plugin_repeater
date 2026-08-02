@@ -4,24 +4,24 @@
       "title": "Intelligent Copy Test",
       "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
       "heading": "Intelligent Copy Test",
-      "intro": "Save the shared route, provider, and model; run non-destructive copy tests; and inspect seven days of records.",
+      "intro": "Save shared generation settings. Tests do not send group messages, mute users, or change group state; results are added to activity records.",
       "navigation": {
         "label": "Console navigation",
-        "configuration": "Route setup",
+        "configuration": "Generation setup",
         "tests": "Copy tests",
         "history": "Activity"
       },
       "configuration": {
         "kicker": "Shared configuration",
-        "title": "Provider route and model",
+        "title": "Intelligent copy generation settings",
         "mode": {
-          "label": "Generation route",
+          "label": "Generation mode",
           "astrbot": "AstrBot chat provider",
           "openai_compatible": "OpenAI-compatible direct",
           "astrbot_description": "Use an AstrBot-configured chat provider",
           "astrbot_help": "Use an AstrBot-configured chat provider; a blank provider follows the triggering session.",
-          "manual_help": "Connect directly to a compatible service without relying on the AstrBot chat-provider catalog.",
-          "manual_description": "Connect to a custom OpenAI-compatible service"
+          "manual_help": "Connect directly to an OpenAI-compatible service. Direct generation requires a saved API base URL, API key, and custom model ID, without the AstrBot chat-provider catalog.",
+          "manual_description": "Connect directly to an OpenAI-compatible service"
         },
         "provider": {
           "label": "Chat provider",
@@ -31,35 +31,37 @@
         "manual_api_base": {
           "label": "API Base URL",
           "placeholder": "For example, http://localhost:8000/v1",
-          "help": "Direct mode only. Enter the compatible service root, including any service-required version path."
+          "help": "OpenAI-compatible direct mode only. Direct generation also needs a saved API key and custom model ID. Enter the compatible service root, including any service-required version path."
         },
         "manual_api_key": {
           "label": "API Key",
           "placeholder": "Leave blank to retain the saved key",
-          "help": "Direct mode only. The key is saved with the plugin configuration and never echoed by this page.",
+          "help": "OpenAI-compatible direct mode only. Direct generation also needs a saved API base URL and custom model ID. Leave this input blank to retain the saved key; this page never echoes it.",
           "configured": "Saved; this page never displays the key.",
           "not_configured": "No API key is saved.",
           "clear": "Clear saved key",
           "clear_confirm": "Clear the saved API key? This saves immediately and cannot be undone."
         },
         "model": {
-          "label": "Model ID",
-          "placeholder": "Blank uses the AstrBot provider default model",
-          "manual_placeholder": "A model ID is required in direct mode",
-          "help": "Choose a candidate or enter a custom model ID that was not enumerated.",
-          "manual_help": "Direct mode requires a model ID and does not enumerate third-party models.",
+          "label": "Custom model ID",
+          "placeholder": "AstrBot mode: leave blank unless overriding the chat provider's model",
+          "manual_placeholder": "OpenAI-compatible direct mode requires a custom model ID",
+          "help": "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
+          "manual_help": "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
+          "blank_provider_help": "Without a selected chat provider, production messages follow the triggering session and this page cannot run a test. A custom model ID still overrides the chat provider's model.",
           "loading": "Loading model candidates…",
-          "unavailable": "Model candidates are unavailable; a custom model ID can still be entered."
+          "unavailable": "Model candidates are unavailable; a custom model ID can still be entered.",
+          "provider_selected": "Provider-selected model (no custom model ID specified)"
         },
         "save": "Save configuration",
         "saved": "Configuration saved.",
         "saving": "Saving…"
       },
       "runtime": {
-        "repeat_on": "Intelligent interrupt: active",
-        "repeat_off": "Intelligent interrupt: off",
-        "mute_on": "Intelligent mute notice: active",
-        "mute_off": "Intelligent mute notice: off"
+        "repeat_on": "Intelligent interrupt: enabled on interruption",
+        "repeat_off": "Intelligent interrupt: disabled",
+        "mute_on": "Intelligent mute notice: enabled after a successful mute",
+        "mute_off": "Intelligent mute notice: disabled"
       },
       "tests": {
         "repeat": {

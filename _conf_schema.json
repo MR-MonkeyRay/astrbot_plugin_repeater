@@ -21,15 +21,15 @@
         "type": "int",
         "default": 3,
         "slider": {"min": 2, "max": 50, "step": 1},
-        "description": "复读触发人数",
-        "hint": "同一内容需由多少名不同用户发送（含首位）才达到复读条件。"
+        "description": "复读/打断触发人数",
+        "hint": "同一内容需由多少名不同用户发送（含首位）后，才会进入打断或普通复读判定。"
       },
       "probability": {
         "type": "float",
         "default": 0.3,
         "slider": {"min": 0, "max": 1, "step": 0.01},
         "description": "复读概率",
-        "hint": "达到复读条件且未命中打断时，回发原消息的概率（0%–100%）。"
+        "hint": "达到复读/打断触发人数且未命中打断时，回发原消息的概率（0%–100%）。"
       }
     }
   },
@@ -56,7 +56,7 @@
         "default": 0.1,
         "slider": {"min": 0, "max": 1, "step": 0.01},
         "description": "打断概率",
-        "hint": "达到阈值后优先发送打断文本的概率（0%–100%）。"
+        "hint": "达到复读/打断触发人数后，优先发送打断文本的概率（0%–100%）。"
       },
       "texts": {
         "type": "list",
@@ -123,47 +123,47 @@
         ],
         "items": {"type": "string"},
         "description": "禁言提示文案",
-        "hint": "智能禁言提示关闭、不可用或生成失败时随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空使用默认文案。"
+        "hint": "智能禁言提示关闭、不可用或生成失败时从此列表随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空时仅使用单条内置默认文案“用户{user}因命中打断复读禁言策略而被禁言{time}s”。"
       }
     }
   },
   "intelligent_provider": {
     "description": "智能文案服务",
     "type": "object",
-    "hint": "为智能打断和智能禁言提示统一选择 AstrBot 聊天供应商或自定义 OpenAI 兼容服务。",
+    "hint": "为智能打断和智能禁言提示统一选择 AstrBot 聊天供应商或 OpenAI 兼容直连服务；直连模式须同时保存 API Base URL、API Key 和自定义模型 ID。",
     "items": {
       "mode": {
         "type": "string",
         "default": "astrbot",
         "options": ["astrbot", "openai_compatible"],
-        "labels": ["AstrBot", "自定义"],
-        "description": "供应商模式",
-        "hint": "选择 AstrBot 已配置聊天供应商或自定义 OpenAI 兼容服务。"
+        "labels": ["AstrBot 聊天供应商", "OpenAI 兼容直连"],
+        "description": "生成方式",
+        "hint": "选择 AstrBot 已配置聊天供应商，或直接连接 OpenAI 兼容服务；直连模式须同时保存 API Base URL、API Key 和自定义模型 ID。"
       },
       "provider_id": {
         "type": "string",
         "default": "",
         "_special": "select_provider",
         "description": "AstrBot 聊天供应商 ID",
-        "hint": "仅 AstrBot 模式使用；留空跟随触发会话。"
+        "hint": "仅 AstrBot 模式使用；留空时生产消息跟随触发会话，页面测试必须先选择明确的聊天供应商。"
       },
       "manual_api_base": {
         "type": "string",
         "default": "",
-        "description": "自定义 API Base URL",
-        "hint": "仅自定义模式使用；填写服务根 URL，例如 http://localhost:8000/v1。"
+        "description": "OpenAI 兼容直连 API Base URL",
+        "hint": "仅 OpenAI 兼容直连模式使用；直连调用还需已保存 API Key 和自定义模型 ID。填写服务根 URL，例如 http://localhost:8000/v1。"
       },
       "manual_api_key": {
         "type": "string",
         "default": "",
-        "description": "自定义 API Key",
-        "hint": "仅自定义模式使用；Key 会保存且不回显。"
+        "description": "OpenAI 兼容直连 API Key",
+        "hint": "仅 OpenAI 兼容直连模式使用；直连调用还需已保存 API Base URL 和自定义模型 ID；Key 会保存且不回显。"
       },
       "model": {
         "type": "string",
         "default": "",
-        "description": "模型 ID",
-        "hint": "AstrBot 模式可留空；自定义模式必须填写模型 ID。"
+        "description": "自定义模型 ID",
+        "hint": "AstrBot 模式通常留空，插件不覆盖聊天供应商的模型；OpenAI 兼容直连模式必须填写自定义模型 ID。"
       }
     }
   },

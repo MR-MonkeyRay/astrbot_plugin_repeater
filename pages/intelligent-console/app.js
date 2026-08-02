@@ -205,7 +205,7 @@
     elements.modeHelp.textContent = manualMode
       ? translate(
         "configuration.mode.manual_help",
-        "Connect directly to a compatible service without relying on the chat-provider catalog.",
+        "Connect directly to an OpenAI-compatible service. Direct generation requires a saved API base URL, API key, and custom model ID.",
       )
       : translate(
         "configuration.mode.astrbot_help",
@@ -214,18 +214,21 @@
     elements.model.placeholder = manualMode
       ? translate(
         "configuration.model.manual_placeholder",
-        "A model ID is required in direct mode",
+        "OpenAI-compatible direct mode requires a custom model ID",
       )
       : translate(
         "configuration.model.placeholder",
-        "Blank uses the AstrBot provider default model",
+        "AstrBot mode: leave blank unless overriding the chat provider's model",
       );
-    if (manualMode) {
-      elements.modelHelp.textContent = translate(
+    elements.modelHelp.textContent = manualMode
+      ? translate(
         "configuration.model.manual_help",
-        "Direct mode requires a model ID and does not enumerate third-party models.",
+        "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
+      )
+      : translate(
+        "configuration.model.help",
+        "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
       );
-    }
     updateManualApiKeyStatus();
   }
 
@@ -255,8 +258,8 @@
     element.classList.toggle("is-active", Boolean(enabled));
     element.classList.toggle("is-inactive", !enabled);
     element.textContent = enabled
-      ? translate(activeKey, "Active")
-      : translate(inactiveKey, "Off");
+      ? translate(activeKey, "Enabled")
+      : translate(inactiveKey, "Disabled");
   }
 
   function createOption(value, label) {
@@ -353,15 +356,15 @@
     if (isManualProviderMode()) {
       elements.modelHelp.textContent = translate(
         "configuration.model.manual_help",
-        "Direct mode requires a model ID and does not enumerate third-party models.",
+        "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
       );
       return;
     }
     const providerId = elements.provider.value;
     if (!providerId) {
       elements.modelHelp.textContent = translate(
-        "configuration.provider.help",
-        "A blank provider follows the triggering group-message session and cannot be tested from this page.",
+        "configuration.model.blank_provider_help",
+        "Without a selected chat provider, production messages follow the triggering session and this page cannot run a test. A custom model ID still overrides the chat provider's model.",
       );
       return;
     }
@@ -379,7 +382,7 @@
       populateModels(Array.isArray(data.models) ? data.models : []);
       elements.modelHelp.textContent = translate(
         "configuration.model.help",
-        "Choose a candidate or enter a custom model ID that was not enumerated.",
+        "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
       );
     } catch (error) {
       if (requestId !== state.modelRequestId) {
@@ -563,7 +566,10 @@
     );
     try {
       const data = await apiPost(`intelligent-console/test/${kind}`, {});
-      const model = data.model || translate("configuration.model.placeholder", "default");
+      const model = data.model || translate(
+        "configuration.model.provider_selected",
+        "Provider-selected model (no custom model ID specified)",
+      );
       setTestResult(
         result,
         interpolate(

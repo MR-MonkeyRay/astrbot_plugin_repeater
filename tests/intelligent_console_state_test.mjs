@@ -173,6 +173,14 @@ globalThis.window = {
       throw new Error(`Unexpected GET ${endpoint}`);
     },
     apiPost: async (endpoint, payload) => {
+      if (endpoint === "intelligent-console/test/repeat") {
+        return {
+          latency_ms: 7,
+          model: "",
+          provider_id: "provider-a",
+          text: "provider result",
+        };
+      }
       assert.equal(endpoint, "intelligent-console/config");
       configPosts.push(payload);
       if (configPosts.length === 1) {
@@ -227,12 +235,20 @@ await settle();
 assert.equal(astrbotRouteTab.classList.contains("is-active"), true);
 assert.equal(elementFor("#astrbot-provider-field").hidden, false);
 assert.equal(elementFor("#manual-api-base-field").hidden, true);
+assert.equal(
+  elementFor("#model-help").textContent,
+  "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
+);
 
 manualRouteTab.click();
 await settle();
 assert.equal(manualRouteTab.classList.contains("is-active"), true);
 assert.equal(elementFor("#astrbot-provider-field").hidden, true);
 assert.equal(elementFor("#manual-api-base-field").hidden, false);
+assert.equal(
+  elementFor("#model-help").textContent,
+  "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
+);
 
 elementFor("#clear-manual-api-key").click();
 await settle();
@@ -249,6 +265,12 @@ elementFor("#manual-api-key-input").value = "replacement-key";
 elementFor("#save-config").click();
 await settle();
 assert.equal(configPosts.length, 3);
+elementFor("#test-repeat").click();
+await settle();
+assert.match(
+  elementFor("#repeat-result").textContent,
+  /Provider-selected model \(no custom model ID specified\)/,
+);
 assert.equal(configPosts[2].manual_api_key, "replacement-key");
 
 const [firstRow, firstDetailRow, secondRow, secondDetailRow] = elementFor(

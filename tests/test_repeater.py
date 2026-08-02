@@ -134,16 +134,40 @@ class ConfigSchemaTest(unittest.TestCase):
     def test_intelligent_sections_preserve_provider_and_prompt_contracts(self) -> None:
         schema = self._load_schema()
         provider = schema["intelligent_provider"]["items"]
+        repeat = schema["repeat"]["items"]
+        self.assertEqual(repeat["threshold"]["description"], "复读/打断触发人数")
+        self.assertIn("打断或普通复读判定", repeat["threshold"]["hint"])
+        self.assertIn(
+            "复读/打断触发人数",
+            schema["interrupt"]["items"]["probability"]["hint"],
+        )
+        self.assertIn(
+            DEFAULT_INTERRUPT_MUTE_TEXT,
+            schema["mute"]["items"]["texts"]["hint"],
+        )
         self.assertEqual(provider["mode"]["default"], "astrbot")
         self.assertEqual(
             provider["mode"]["options"],
             ["astrbot", "openai_compatible"],
         )
-        self.assertEqual(provider["mode"]["labels"], ["AstrBot", "自定义"])
+        self.assertEqual(
+            provider["mode"]["labels"],
+            ["AstrBot 聊天供应商", "OpenAI 兼容直连"],
+        )
         self.assertEqual(provider["provider_id"]["_special"], "select_provider")
+        self.assertIn("生产消息跟随触发会话", provider["provider_id"]["hint"])
+        self.assertIn(
+            "页面测试必须先选择明确的聊天供应商", provider["provider_id"]["hint"]
+        )
         self.assertEqual(provider["manual_api_base"]["default"], "")
+        self.assertIn(
+            "API Key 和自定义模型 ID",
+            provider["manual_api_base"]["hint"],
+        )
         self.assertEqual(provider["manual_api_key"]["default"], "")
         self.assertEqual(provider["model"]["default"], "")
+        self.assertEqual(provider["model"]["description"], "自定义模型 ID")
+        self.assertIn("插件不覆盖聊天供应商的模型", provider["model"]["hint"])
 
         intelligent_interrupt = schema["intelligent_interrupt"]["items"]
         self.assertFalse(intelligent_interrupt["enabled"]["default"])
