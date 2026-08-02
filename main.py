@@ -25,6 +25,7 @@ if __package__:
     from .repeater_config import (
         INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH,
         INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH,
+        CONFIG_SECTION_INTELLIGENT_PROVIDER,
         INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
         INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE,
         RepeaterSettings,
@@ -40,6 +41,7 @@ else:
     from repeater_config import (
         INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH,
         INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH,
+        CONFIG_SECTION_INTELLIGENT_PROVIDER,
         INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
         INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE,
         RepeaterSettings,
@@ -493,7 +495,7 @@ class RepeaterPlugin(Star):
     @staticmethod
     def _save_astrbot_config_snapshot(
         config: Any,
-        updates: dict[str, str],
+        updates: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
         """Write one AstrBotConfig snapshot without exposing a revision race."""
         state_lock = config._save_state_lock
@@ -543,11 +545,13 @@ class RepeaterPlugin(Star):
                 else manual_api_key
             )
             updates = {
-                "intelligent_interrupt_provider_mode": provider_mode,
-                "intelligent_interrupt_provider_id": provider_id,
-                "intelligent_interrupt_manual_api_base": manual_api_base,
-                "intelligent_interrupt_manual_api_key": effective_manual_api_key,
-                "intelligent_interrupt_model": model,
+                CONFIG_SECTION_INTELLIGENT_PROVIDER: {
+                    "mode": provider_mode,
+                    "provider_id": provider_id,
+                    "manual_api_base": manual_api_base,
+                    "manual_api_key": effective_manual_api_key,
+                    "model": model,
+                },
             }
             state_lock = getattr(self.config, "_save_state_lock", None)
             write_snapshot = getattr(self.config, "_write_config_snapshot", None)

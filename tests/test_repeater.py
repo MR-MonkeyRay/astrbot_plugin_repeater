@@ -47,304 +47,145 @@ from intelligent_history import (
 
 
 class ConfigSchemaTest(unittest.TestCase):
-    def test_slider_fields_use_expected_ranges(self) -> None:
+    @staticmethod
+    def _load_schema() -> dict:
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        return json.loads(schema_path.read_text(encoding="utf-8"))
 
+    def test_schema_uses_ordered_feature_sections(self) -> None:
+        schema = self._load_schema()
+        expected_sections = {
+            "repeat": [
+                "default_enabled",
+                "disabled_group_ids",
+                "threshold",
+                "probability",
+            ],
+            "interrupt": [
+                "default_enabled",
+                "disabled_group_ids",
+                "probability",
+                "texts",
+            ],
+            "mute": [
+                "enabled",
+                "disabled_group_ids",
+                "probability",
+                "duration_min",
+                "duration_max",
+                "texts",
+            ],
+            "intelligent_provider": [
+                "mode",
+                "provider_id",
+                "manual_api_base",
+                "manual_api_key",
+                "model",
+            ],
+            "intelligent_interrupt": ["enabled", "prompt"],
+            "intelligent_mute": ["enabled", "prompt"],
+        }
+
+        self.assertEqual(list(schema), list(expected_sections))
+        for section_name, expected_fields in expected_sections.items():
+            with self.subTest(section=section_name):
+                section = schema[section_name]
+                self.assertEqual(section["type"], "object")
+                self.assertIsInstance(section["description"], str)
+                self.assertTrue(section["description"])
+                self.assertIsInstance(section["hint"], str)
+                self.assertTrue(section["hint"])
+                self.assertEqual(list(section["items"]), expected_fields)
+
+    def test_slider_fields_use_expected_ranges(self) -> None:
+        schema = self._load_schema()
         expected_sliders = {
-            "repeat_threshold": ("int", {"min": 2, "max": 50, "step": 1}),
-            "repeat_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
-            "interrupt_probability": ("float", {"min": 0, "max": 1, "step": 0.01}),
-            "interrupt_mute_duration_min": (
+            ("repeat", "threshold"): ("int", {"min": 2, "max": 50, "step": 1}),
+            ("repeat", "probability"): (
+                "float",
+                {"min": 0, "max": 1, "step": 0.01},
+            ),
+            ("interrupt", "probability"): (
+                "float",
+                {"min": 0, "max": 1, "step": 0.01},
+            ),
+            ("mute", "duration_min"): (
                 "int",
                 {"min": 1, "max": 3600, "step": 1},
             ),
-            "interrupt_mute_duration_max": (
+            ("mute", "duration_max"): (
                 "int",
                 {"min": 1, "max": 3600, "step": 1},
             ),
-            "interrupt_mute_probability": (
+            ("mute", "probability"): (
                 "float",
                 {"min": 0, "max": 1, "step": 0.01},
             ),
         }
-        for key, (field_type, slider) in expected_sliders.items():
-            with self.subTest(key=key):
-                field = schema[key]
+        for (section_name, field_name), (
+            field_type,
+            slider,
+        ) in expected_sliders.items():
+            with self.subTest(section=section_name, field=field_name):
+                field = schema[section_name]["items"][field_name]
                 self.assertEqual(field["type"], field_type)
                 self.assertEqual(field["slider"], slider)
 
-    def test_configuration_schema_uses_feature_group_order(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
+    def test_intelligent_sections_preserve_provider_and_prompt_contracts(self) -> None:
+        schema = self._load_schema()
+        provider = schema["intelligent_provider"]["items"]
+        self.assertEqual(provider["mode"]["default"], "astrbot")
         self.assertEqual(
-            list(schema.keys()),
-            [
-                "default_enabled",
-                "repeat_disabled_group_ids",
-                "repeat_threshold",
-                "repeat_probability",
-                "interrupt_default_enabled",
-                "interrupt_disabled_group_ids",
-                "interrupt_probability",
-                "interrupt_texts",
-                "interrupt_mute_enabled",
-                "interrupt_mute_disabled_group_ids",
-                "interrupt_mute_probability",
-                "interrupt_mute_duration_min",
-                "interrupt_mute_duration_max",
-                "interrupt_mute_texts",
-                "intelligent_interrupt_provider_mode",
-                "intelligent_interrupt_provider_id",
-                "intelligent_interrupt_manual_api_base",
-                "intelligent_interrupt_manual_api_key",
-                "intelligent_interrupt_model",
-                "intelligent_interrupt_enabled",
-                "intelligent_interrupt_prompt",
-                "intelligent_interrupt_mute_enabled",
-                "intelligent_interrupt_mute_prompt",
-            ],
+            provider["mode"]["options"],
+            ["astrbot", "openai_compatible"],
         )
+        self.assertEqual(provider["mode"]["labels"], ["AstrBot", "自定义"])
+        self.assertEqual(provider["provider_id"]["_special"], "select_provider")
+        self.assertEqual(provider["manual_api_base"]["default"], "")
+        self.assertEqual(provider["manual_api_key"]["default"], "")
+        self.assertEqual(provider["model"]["default"], "")
 
-    def test_interrupt_mute_fields_have_expected_defaults(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(schema["interrupt_mute_enabled"]["type"], "bool")
-        self.assertFalse(schema["interrupt_mute_enabled"]["default"])
-        self.assertEqual(schema["interrupt_mute_disabled_group_ids"]["type"], "list")
-        self.assertEqual(schema["interrupt_mute_disabled_group_ids"]["default"], [])
-        self.assertEqual(schema["interrupt_mute_duration_min"]["default"], 1)
-        self.assertEqual(schema["interrupt_mute_duration_max"]["default"], 15)
-        self.assertEqual(schema["interrupt_mute_probability"]["default"], 0.05)
-        self.assertEqual(len(schema["interrupt_mute_texts"]["default"]), 5)
-
-    def test_shared_intelligent_text_fields_have_expected_defaults(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
+        intelligent_interrupt = schema["intelligent_interrupt"]["items"]
+        self.assertFalse(intelligent_interrupt["enabled"]["default"])
         self.assertEqual(
-            schema["intelligent_interrupt_provider_mode"]["type"], "string"
-        )
-        self.assertEqual(
-            schema["intelligent_interrupt_provider_mode"]["default"], "astrbot"
-        )
-        self.assertEqual(schema["intelligent_interrupt_provider_id"]["type"], "string")
-        self.assertEqual(schema["intelligent_interrupt_provider_id"]["default"], "")
-        self.assertEqual(
-            schema["intelligent_interrupt_provider_id"]["_special"],
-            "select_provider",
-        )
-        self.assertEqual(
-            schema["intelligent_interrupt_manual_api_base"]["type"],
-            "string",
-        )
-        self.assertEqual(schema["intelligent_interrupt_manual_api_base"]["default"], "")
-        self.assertEqual(
-            schema["intelligent_interrupt_manual_api_key"]["type"],
-            "string",
-        )
-        self.assertEqual(schema["intelligent_interrupt_manual_api_key"]["default"], "")
-        self.assertEqual(schema["intelligent_interrupt_model"]["type"], "string")
-        self.assertEqual(schema["intelligent_interrupt_model"]["default"], "")
-
-    def test_intelligent_interrupt_fields_have_expected_defaults(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(schema["intelligent_interrupt_enabled"]["type"], "bool")
-        self.assertFalse(schema["intelligent_interrupt_enabled"]["default"])
-        self.assertEqual(schema["intelligent_interrupt_prompt"]["type"], "text")
-        self.assertEqual(
-            schema["intelligent_interrupt_prompt"]["default"],
+            intelligent_interrupt["prompt"]["default"],
             DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         )
-
-    def test_intelligent_interrupt_mute_fields_have_expected_defaults(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
-
-        self.assertEqual(schema["intelligent_interrupt_mute_enabled"]["type"], "bool")
-        self.assertFalse(schema["intelligent_interrupt_mute_enabled"]["default"])
-        self.assertEqual(schema["intelligent_interrupt_mute_prompt"]["type"], "text")
+        intelligent_mute = schema["intelligent_mute"]["items"]
+        self.assertFalse(intelligent_mute["enabled"]["default"])
         self.assertEqual(
-            schema["intelligent_interrupt_mute_prompt"]["default"],
+            intelligent_mute["prompt"]["default"],
             DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
         )
 
-    def test_configuration_schema_is_complete_and_descriptive(self) -> None:
-        schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
-        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    def test_every_leaf_field_is_descriptive_and_has_a_default(self) -> None:
+        schema = self._load_schema()
+        for section_name, section in schema.items():
+            for field_name, field in section["items"].items():
+                with self.subTest(section=section_name, field=field_name):
+                    self.assertIn("default", field)
+                    self.assertIsInstance(field["description"], str)
+                    self.assertTrue(field["description"])
+                    self.assertIsInstance(field["hint"], str)
+                    self.assertTrue(field["hint"])
 
-        expected_schema = {
-            "default_enabled": {
-                "type": "bool",
-                "default": True,
-                "description": "默认开启复读",
-                "hint": "未被群级开关单独设置的群是否默认开启复读。",
-            },
-            "repeat_disabled_group_ids": {
-                "type": "list",
-                "default": [],
-                "items": {"type": "string"},
-                "description": "关闭复读的群号",
-                "hint": "由复读开关指令维护；列表中的群不触发普通复读。",
-            },
-            "repeat_threshold": {
-                "type": "int",
-                "default": 3,
-                "slider": {"min": 2, "max": 50, "step": 1},
-                "description": "复读触发人数",
-                "hint": "同一内容需由多少名不同用户发送（含首位）才达到复读条件。",
-            },
-            "repeat_probability": {
-                "type": "float",
-                "default": 0.3,
-                "slider": {"min": 0, "max": 1, "step": 0.01},
-                "description": "复读概率",
-                "hint": "达到复读条件且未命中打断时，回发原消息的概率（0%–100%）。",
-            },
-            "interrupt_default_enabled": {
-                "type": "bool",
-                "default": True,
-                "description": "默认开启打断复读",
-                "hint": "未被群级开关单独设置的群是否默认开启打断复读。",
-            },
-            "interrupt_disabled_group_ids": {
-                "type": "list",
-                "default": [],
-                "items": {"type": "string"},
-                "description": "关闭打断复读的群号",
-                "hint": "由打断复读开关指令维护；列表中的群不触发打断复读。",
-            },
-            "interrupt_probability": {
-                "type": "float",
-                "default": 0.1,
-                "slider": {"min": 0, "max": 1, "step": 0.01},
-                "description": "打断概率",
-                "hint": "达到阈值后优先发送打断文本的概率（0%–100%）。",
-            },
-            "interrupt_texts": {
-                "type": "list",
-                "default": [
-                    "叮——复读结界已启动，下一位请说点新鲜的！",
-                    "抓到一群小鹦鹉，统统没收作案声带～",
-                    "前方禁止复制粘贴，本喵要开始随机巡逻啦！",
-                    "复读能量过载！啪叽一下，频道已被我掐断。",
-                    "同一句再来一遍就要收费啦，先欠我一颗糖！",
-                ],
-                "items": {"type": "string"},
-                "description": "随机打断文案",
-                "hint": "智能打断关闭、不可用或生成失败时，从此列表随机选择；留空使用“打断！”。",
-            },
-            "interrupt_mute_enabled": {
-                "type": "bool",
-                "default": False,
-                "description": "打断复读禁言",
-                "hint": "开启后，打断复读触发时按概率尝试禁言触发用户；默认关闭。",
-            },
-            "interrupt_mute_disabled_group_ids": {
-                "type": "list",
-                "default": [],
-                "items": {"type": "string"},
-                "description": "关闭禁言的群号",
-                "hint": "列表中的群不执行打断复读禁言。",
-            },
-            "interrupt_mute_probability": {
-                "type": "float",
-                "default": 0.05,
-                "slider": {"min": 0, "max": 1, "step": 0.01},
-                "description": "禁言概率",
-                "hint": "打断复读触发后尝试禁言的概率（0%–100%）。",
-            },
-            "interrupt_mute_duration_min": {
-                "type": "int",
-                "default": 1,
-                "slider": {"min": 1, "max": 3600, "step": 1},
-                "description": "最短禁言时长",
-                "hint": "随机禁言时长的下限，单位秒；应不大于最长禁言时长。",
-            },
-            "interrupt_mute_duration_max": {
-                "type": "int",
-                "default": 15,
-                "slider": {"min": 1, "max": 3600, "step": 1},
-                "description": "最长禁言时长",
-                "hint": "随机禁言时长的上限，单位秒；应不小于最短禁言时长。",
-            },
-            "interrupt_mute_texts": {
-                "type": "list",
-                "default": [
-                    "你以为你打断了复读？错！你已经被打断了人生 {time} 秒 🤐",
-                    "打断复读？不好意思，你也被打断发言权了，{time}秒后见 😏",
-                    "恭喜 {user} 同学成功触发【打断复读禁言】成就，奖励禁言 {time} 秒 🎉",
-                    "复读虽可恶，打断更该罚！{user} 请安静 {time} 秒反思一下 🤔",
-                    "检测到反复读行为，根据群规第114514条，{user} 将被禁言 {time} 秒 ⚖️",
-                ],
-                "items": {"type": "string"},
-                "description": "禁言提示文案",
-                "hint": "智能禁言提示关闭、不可用或生成失败时随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空使用默认文案。",
-            },
-            "intelligent_interrupt_provider_mode": {
-                "type": "string",
-                "default": "astrbot",
-                "options": ["astrbot", "openai_compatible"],
-                "labels": ["AstrBot", "自定义"],
-                "description": "智能文案供应商选择",
-                "hint": "选择 AstrBot 或自定义 OpenAI兼容服务。",
-            },
-            "intelligent_interrupt_provider_id": {
-                "type": "string",
-                "default": "",
-                "_special": "select_provider",
-                "description": "智能文案 AstrBot 供应商 ID",
-                "hint": "仅 AstrBot 使用；留空跟随触发会话。",
-            },
-            "intelligent_interrupt_manual_api_base": {
-                "type": "string",
-                "default": "",
-                "description": "自定义 OpenAI兼容 API Base URL",
-                "hint": "仅自定义使用；填写服务根 URL，例如 http://localhost:8000/v1。",
-            },
-            "intelligent_interrupt_manual_api_key": {
-                "type": "string",
-                "default": "",
-                "description": "自定义 OpenAI兼容 API Key",
-                "hint": "仅自定义使用；Key 会保存且不回显。",
-            },
-            "intelligent_interrupt_model": {
-                "type": "string",
-                "default": "",
-                "description": "智能文案模型",
-                "hint": "AstrBot 可留空；自定义必须填写模型 ID。",
-            },
-            "intelligent_interrupt_enabled": {
-                "type": "bool",
-                "default": False,
-                "description": "智能打断",
-                "hint": "开启后，打断命中时按共享供应商模式生成一条打断文案；默认关闭。",
-            },
-            "intelligent_interrupt_prompt": {
-                "type": "text",
-                "default": DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
-                "description": "智能打断提示词",
-                "hint": "作为生成打断文案的 LLM 系统提示词；空值或非法值回退默认提示词。",
-            },
-            "intelligent_interrupt_mute_enabled": {
-                "type": "bool",
-                "default": False,
-                "description": "智能禁言提示",
-                "hint": "开启后，禁言成功时按与智能打断共用的供应商模式和模型生成一条提示文案；默认关闭。",
-            },
-            "intelligent_interrupt_mute_prompt": {
-                "type": "text",
-                "default": DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
-                "description": "智能禁言提示词",
-                "hint": "作为生成禁言提示文案的 LLM 系统提示词；空值或非法值回退默认提示词。",
-            },
-        }
-        self.maxDiff = None
-        self.assertEqual(schema, expected_schema)
+    def test_astrbot_generates_grouped_default_configuration(self) -> None:
+        from astrbot.core.config.astrbot_config import AstrBotConfig
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = AstrBotConfig(
+                config_path=str(Path(directory) / "repeater_config.json"),
+                schema=self._load_schema(),
+            )
+
+        self.assertEqual(config["repeat"]["threshold"], 3)
+        self.assertEqual(
+            config["interrupt"]["texts"][0], "叮——复读结界已启动，下一位请说点新鲜的！"
+        )
+        self.assertFalse(config["mute"]["enabled"])
+        self.assertEqual(config["intelligent_provider"]["mode"], "astrbot")
+        self.assertFalse(config["intelligent_interrupt"]["enabled"])
+        self.assertFalse(config["intelligent_mute"]["enabled"])
 
 
 class ImportPathTest(unittest.TestCase):
@@ -429,25 +270,28 @@ class ConfigModuleTest(unittest.TestCase):
         logger = RecordingLogger()
         settings = build_settings(
             {
-                "repeat_disabled_group_ids": [1, " group ", True, ""],
-                "interrupt_disabled_group_ids": "invalid",
-                "repeat_threshold": True,
-                "repeat_probability": True,
-                "default_enabled": 1,
-                "interrupt_probability": True,
-                "interrupt_texts": (" 打断甲 ", "", 1),
-                "interrupt_default_enabled": "yes",
-                "intelligent_interrupt_enabled": "yes",
-                "intelligent_interrupt_provider_id": 1,
-                "intelligent_interrupt_model": [],
-                "intelligent_interrupt_prompt": "   ",
-                "interrupt_mute_enabled": 0,
-                "interrupt_mute_duration_min": 60,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": True,
-                "interrupt_mute_texts": "invalid",
-                "intelligent_interrupt_mute_enabled": "yes",
-                "intelligent_interrupt_mute_prompt": "   ",
+                "repeat": {
+                    "disabled_group_ids": [1, " group ", True, ""],
+                    "threshold": True,
+                    "probability": True,
+                    "default_enabled": 1,
+                },
+                "interrupt": {
+                    "default_enabled": "yes",
+                    "disabled_group_ids": "invalid",
+                    "probability": True,
+                    "texts": (" 打断甲 ", "", 1),
+                },
+                "mute": {
+                    "enabled": 0,
+                    "duration_min": 60,
+                    "duration_max": 30,
+                    "probability": True,
+                    "texts": "invalid",
+                },
+                "intelligent_provider": {"provider_id": 1, "model": []},
+                "intelligent_interrupt": {"enabled": "yes", "prompt": "   "},
+                "intelligent_mute": {"enabled": "yes", "prompt": "   "},
             },
             logger,
         )
@@ -480,23 +324,22 @@ class ConfigModuleTest(unittest.TestCase):
         self.assertEqual(
             logger.warnings,
             [
-                "[repeater] default_enabled 非法(1)，回退为 True",
-                "[repeater] repeat_threshold 非法(True)，回退为 3",
-                "[repeater] repeat_probability 非法(True)，回退为 0.3",
-                "[repeater] interrupt_default_enabled 非法(yes)，回退为 True",
-                "[repeater] interrupt_disabled_group_ids 非法，使用空列表",
-                "[repeater] interrupt_probability 非法(True)，回退为 0.1",
-                "[repeater] interrupt_mute_enabled 非法(0)，回退为 False",
-                "[repeater] interrupt_mute_probability 非法(True)，回退为 0.05",
-                "[repeater] interrupt_mute_duration_max 小于 "
-                "interrupt_mute_duration_min，使用下限值",
-                "[repeater] interrupt_mute_texts 非法或为空，回退为默认禁言文本",
-                "[repeater] intelligent_interrupt_provider_id 非法(1)，回退为空字符串",
-                "[repeater] intelligent_interrupt_model 非法([])，回退为空字符串",
-                "[repeater] intelligent_interrupt_enabled 非法(yes)，回退为 False",
-                "[repeater] intelligent_interrupt_prompt 非法或为空，回退为默认智能打断提示词",
-                "[repeater] intelligent_interrupt_mute_enabled 非法(yes)，回退为 False",
-                "[repeater] intelligent_interrupt_mute_prompt 非法或为空，回退为默认智能禁言提示词",
+                "[repeater] repeat.default_enabled 非法(1)，回退为 True",
+                "[repeater] repeat.threshold 非法(True)，回退为 3",
+                "[repeater] repeat.probability 非法(True)，回退为 0.3",
+                "[repeater] interrupt.default_enabled 非法(yes)，回退为 True",
+                "[repeater] interrupt.disabled_group_ids 非法，使用空列表",
+                "[repeater] interrupt.probability 非法(True)，回退为 0.1",
+                "[repeater] mute.enabled 非法(0)，回退为 False",
+                "[repeater] mute.probability 非法(True)，回退为 0.05",
+                "[repeater] mute.duration_max 小于 mute.duration_min，使用下限值",
+                "[repeater] mute.texts 非法或为空，回退为默认禁言文本",
+                "[repeater] intelligent_provider.provider_id 非法(1)，回退为空字符串",
+                "[repeater] intelligent_provider.model 非法([])，回退为空字符串",
+                "[repeater] intelligent_interrupt.enabled 非法(yes)，回退为 False",
+                "[repeater] intelligent_interrupt.prompt 非法或为空，回退为默认智能打断提示词",
+                "[repeater] intelligent_mute.enabled 非法(yes)，回退为 False",
+                "[repeater] intelligent_mute.prompt 非法或为空，回退为默认智能禁言提示词",
             ],
         )
 
@@ -509,17 +352,21 @@ class ConfigModuleTest(unittest.TestCase):
                 self.warnings.append(message)
 
         logger = RecordingLogger()
-        legacy_settings = build_settings({}, logger)
-        self.assertEqual(legacy_settings.intelligent_interrupt_provider_mode, "astrbot")
-        self.assertEqual(legacy_settings.intelligent_interrupt_manual_api_base, "")
-        self.assertEqual(legacy_settings.intelligent_interrupt_manual_api_key, "")
+        default_settings = build_settings({}, logger)
+        self.assertEqual(
+            default_settings.intelligent_interrupt_provider_mode, "astrbot"
+        )
+        self.assertEqual(default_settings.intelligent_interrupt_manual_api_base, "")
+        self.assertEqual(default_settings.intelligent_interrupt_manual_api_key, "")
 
         valid_settings = build_settings(
             {
-                "intelligent_interrupt_provider_mode": "openai_compatible",
-                "intelligent_interrupt_manual_api_base": " http://localhost:8000/v1/ ",
-                "intelligent_interrupt_manual_api_key": " manual-api-key ",
-                "intelligent_interrupt_model": " manual-model ",
+                "intelligent_provider": {
+                    "mode": "openai_compatible",
+                    "manual_api_base": " http://localhost:8000/v1/ ",
+                    "manual_api_key": " manual-api-key ",
+                    "model": " manual-model ",
+                }
             },
             logger,
         )
@@ -540,12 +387,12 @@ class ConfigModuleTest(unittest.TestCase):
         key_sentinel = "manual-api-key-must-not-appear-in-logs-" * 20
         invalid_settings = build_settings(
             {
-                "intelligent_interrupt_provider_mode": "openai_compatible",
-                "intelligent_interrupt_manual_api_base": (
-                    "https://user:password@example.com/v1?trace=1"
-                ),
-                "intelligent_interrupt_manual_api_key": key_sentinel,
-                "intelligent_interrupt_model": [],
+                "intelligent_provider": {
+                    "mode": "openai_compatible",
+                    "manual_api_base": "https://user:password@example.com/v1?trace=1",
+                    "manual_api_key": key_sentinel,
+                    "model": [],
+                }
             },
             logger,
         )
@@ -558,7 +405,7 @@ class ConfigModuleTest(unittest.TestCase):
         self.assertEqual(invalid_settings.intelligent_interrupt_model, "")
         self.assertEqual(
             build_settings(
-                {"intelligent_interrupt_provider_mode": "unsupported"},
+                {"intelligent_provider": {"mode": "unsupported"}},
                 logger,
             ).intelligent_interrupt_provider_mode,
             "astrbot",
@@ -832,11 +679,13 @@ class SnapshotMemoryConfig(MemoryConfig):
         if self.mutate_after_write:
             self.update(
                 {
-                    "intelligent_interrupt_provider_id": "later-provider",
-                    "intelligent_interrupt_model": "later-model",
-                    "intelligent_interrupt_provider_mode": "openai_compatible",
-                    "intelligent_interrupt_manual_api_base": "https://later.example/v1",
-                    "intelligent_interrupt_manual_api_key": "later-key",
+                    "intelligent_provider": {
+                        "provider_id": "later-provider",
+                        "model": "later-model",
+                        "mode": "openai_compatible",
+                        "manual_api_base": "https://later.example/v1",
+                        "manual_api_key": "later-key",
+                    },
                 },
             )
         return self.committed
@@ -1002,6 +851,26 @@ def response_payload(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
 
 
+def _merge_grouped_test_config(
+    config: dict | None,
+    defaults: dict[str, dict[str, object]],
+) -> dict:
+    """Merge nested test overrides with the scenario defaults."""
+    source = copy.deepcopy(dict(config or {}))
+    grouped = copy.deepcopy(defaults)
+    for section_name, value in source.items():
+        if isinstance(value, dict) and isinstance(grouped.get(section_name), dict):
+            grouped[section_name].update(value)
+        else:
+            grouped[section_name] = value
+
+    if config is not None and callable(getattr(config, "save_config", None)):
+        config.clear()
+        config.update(grouped)
+        return config
+    return grouped
+
+
 class MemoryRepeater(RepeaterPlugin):
     def __init__(
         self,
@@ -1012,19 +881,14 @@ class MemoryRepeater(RepeaterPlugin):
         context: object | None = None,
     ) -> None:
         defaults = {
-            "default_enabled": True,
-            "repeat_threshold": 3,
-            "repeat_probability": 1.0,
-            "interrupt_default_enabled": False,
+            "repeat": {
+                "default_enabled": True,
+                "threshold": 3,
+                "probability": 1.0,
+            },
+            "interrupt": {"default_enabled": False},
         }
-        if config is not None and callable(getattr(config, "save_config", None)):
-            for key, value in defaults.items():
-                config.setdefault(key, value)
-            effective_config = config
-        else:
-            effective_config = defaults
-            if config is not None:
-                effective_config.update(config)
+        effective_config = _merge_grouped_test_config(config, defaults)
         super().__init__(context, effective_config)
         self.store = store
         self.put_delay = put_delay
@@ -1187,11 +1051,13 @@ async def run_interrupt_command(
 class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     def test_default_repeat_probability_is_thirty_percent(self) -> None:
         self.assertEqual(
-            RepeaterPlugin(None, {}).state_service.settings.repeat_probability, 0.3
+            RepeaterPlugin(None, {}).state_service.settings.repeat_probability,
+            0.3,
         )
         self.assertEqual(
             RepeaterPlugin(
-                None, {"repeat_probability": "invalid"}
+                None,
+                {"repeat": {"probability": "invalid"}},
             ).state_service.settings.repeat_probability,
             0.3,
         )
@@ -1201,12 +1067,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(plugin.state_service.settings.interrupt_default_enabled)
         self.assertEqual(plugin.state_service.settings.interrupt_probability, 0.1)
         self.assertEqual(
-            plugin.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+            plugin.state_service.settings.interrupt_texts,
+            (DEFAULT_INTERRUPT_TEXT,),
         )
         self.assertEqual(len(plugin.state_service.settings.interrupt_texts), 1)
         self.assertFalse(plugin.state_service.settings.intelligent_interrupt_enabled)
         self.assertEqual(
-            plugin.state_service.settings.intelligent_interrupt_provider_id, ""
+            plugin.state_service.settings.intelligent_interrupt_provider_id,
+            "",
         )
         self.assertEqual(plugin.state_service.settings.intelligent_interrupt_model, "")
         self.assertEqual(
@@ -1214,7 +1082,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         )
         self.assertFalse(
-            plugin.state_service.settings.intelligent_interrupt_mute_enabled
+            plugin.state_service.settings.intelligent_interrupt_mute_enabled,
         )
         self.assertEqual(
             plugin.state_service.settings.intelligent_interrupt_mute_prompt,
@@ -1224,39 +1092,44 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         invalid = RepeaterPlugin(
             None,
             {
-                "interrupt_default_enabled": "yes",
-                "interrupt_probability": "invalid",
-                "interrupt_texts": ["", 1, "   "],
+                "interrupt": {
+                    "default_enabled": "yes",
+                    "probability": "invalid",
+                    "texts": ["", 1, "   "],
+                }
             },
         )
         self.assertTrue(invalid.state_service.settings.interrupt_default_enabled)
         self.assertEqual(invalid.state_service.settings.interrupt_probability, 0.1)
         self.assertEqual(
-            invalid.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+            invalid.state_service.settings.interrupt_texts,
+            (DEFAULT_INTERRUPT_TEXT,),
         )
 
-        empty = RepeaterPlugin(None, {"interrupt_texts": []})
+        empty = RepeaterPlugin(None, {"interrupt": {"texts": []}})
         self.assertEqual(
-            empty.state_service.settings.interrupt_texts, (DEFAULT_INTERRUPT_TEXT,)
+            empty.state_service.settings.interrupt_texts,
+            (DEFAULT_INTERRUPT_TEXT,),
         )
 
         custom = RepeaterPlugin(
             None,
-            {"interrupt_texts": [" 第一条 ", "", 2, "第二条"]},
+            {"interrupt": {"texts": [" 第一条 ", "", 2, "第二条"]}},
         )
         self.assertEqual(
-            custom.state_service.settings.interrupt_texts, ("第一条", "第二条")
+            custom.state_service.settings.interrupt_texts,
+            ("第一条", "第二条"),
         )
 
         intelligent = RepeaterPlugin(
             None,
             {
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": " provider-a ",
-                "intelligent_interrupt_model": " model-b ",
-                "intelligent_interrupt_prompt": "   ",
-                "intelligent_interrupt_mute_enabled": "yes",
-                "intelligent_interrupt_mute_prompt": "   ",
+                "intelligent_provider": {
+                    "provider_id": " provider-a ",
+                    "model": " model-b ",
+                },
+                "intelligent_interrupt": {"enabled": True, "prompt": "   "},
+                "intelligent_mute": {"enabled": "yes", "prompt": "   "},
             },
         ).state_service.settings
         self.assertTrue(intelligent.intelligent_interrupt_enabled)
@@ -1273,10 +1146,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         intelligent_mute = RepeaterPlugin(
             None,
-            {
-                "intelligent_interrupt_mute_enabled": True,
-                "intelligent_interrupt_mute_prompt": " 自定义禁言提示 ",
-            },
+            {"intelligent_mute": {"enabled": True, "prompt": " 自定义禁言提示 "}},
         ).state_service.settings
         self.assertTrue(intelligent_mute.intelligent_interrupt_mute_enabled)
         self.assertEqual(
@@ -1291,12 +1161,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         config = MemoryConfig(
             {
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_disabled_group_ids": [42, " blocked "],
-                "interrupt_mute_duration_min": 120,
-                "interrupt_mute_duration_max": 60,
-                "interrupt_mute_probability": 0.25,
-                "interrupt_mute_texts": [" {user} {time} ", "", 1],
+                "mute": {
+                    "enabled": True,
+                    "disabled_group_ids": [42, " blocked "],
+                    "duration_min": 120,
+                    "duration_max": 60,
+                    "probability": 0.25,
+                    "texts": [" {user} {time} ", "", 1],
+                }
             },
         )
         plugin = RepeaterPlugin(None, config)
@@ -1312,20 +1184,19 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin.state_service.is_interrupt_mute_enabled("blocked"))
 
         settings.save_config()
-        self.assertEqual(
-            config["interrupt_mute_disabled_group_ids"],
-            ["42", "blocked"],
-        )
+        self.assertEqual(config["mute"]["disabled_group_ids"], ["42", "blocked"])
 
         invalid = RepeaterPlugin(
             None,
             {
-                "interrupt_mute_enabled": "yes",
-                "interrupt_mute_disabled_group_ids": "invalid",
-                "interrupt_mute_duration_min": 0,
-                "interrupt_mute_duration_max": True,
-                "interrupt_mute_probability": 1.1,
-                "interrupt_mute_texts": [],
+                "mute": {
+                    "enabled": "yes",
+                    "disabled_group_ids": "invalid",
+                    "duration_min": 0,
+                    "duration_max": True,
+                    "probability": 1.1,
+                    "texts": [],
+                }
             },
         ).state_service.settings
         self.assertFalse(invalid.interrupt_mute_enabled)
@@ -1373,7 +1244,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(not event.sent for event in post_restart))
 
     async def test_same_image_or_face_repeats_original_chain(self) -> None:
-        image_plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        image_plugin = MemoryRepeater(
+            {},
+            {
+                "repeat": {
+                    "threshold": 2,
+                },
+            },
+        )
         await image_plugin.initialize()
         first_image = FakeEvent(
             "image",
@@ -1399,7 +1277,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(image_chain[0], Image)
         self.assertEqual(image_chain[0].file, "same-image")
 
-        face_plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        face_plugin = MemoryRepeater(
+            {},
+            {
+                "repeat": {
+                    "threshold": 2,
+                },
+            },
+        )
         await face_plugin.initialize()
         first_face = FakeEvent("face", "A", "", "1", chain=[Face(id=123)])
         second_face = FakeEvent("face", "B", "", "2", chain=[Face(id=123)])
@@ -1412,7 +1297,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(face_chain[0].id, 123)
 
     async def test_different_media_does_not_share_a_sequence(self) -> None:
-        plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat": {
+                    "threshold": 2,
+                },
+            },
+        )
         await plugin.initialize()
         first = FakeEvent(
             "different-media",
@@ -1438,7 +1330,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_onebot_mface_uses_raw_identity_and_replays_in_order(self) -> None:
-        plugin = MemoryRepeater({}, {"repeat_threshold": 2})
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat": {
+                    "threshold": 2,
+                },
+            },
+        )
         await plugin.initialize()
 
         def mface_event(sender: str, message_id: str, emoji_id: str, url: str):
@@ -1484,9 +1383,13 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -1501,10 +1404,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": [],
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": [],
+                },
             },
         )
         await plugin.initialize()
@@ -1522,15 +1429,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 30,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": 1.0,
-                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "probability": 1.0,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
             },
         )
         await plugin.initialize()
@@ -1584,19 +1497,31 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "intelligent_interrupt_enabled": False,
-                "intelligent_interrupt_provider_id": "provider-a",
-                "intelligent_interrupt_model": "model-b",
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 30,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": 1.0,
-                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
-                "intelligent_interrupt_mute_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": False,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                    "model": "model-b",
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "probability": 1.0,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
+                "intelligent_mute": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -1659,17 +1584,27 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "intelligent_interrupt_enabled": False,
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 30,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": 1.0,
-                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
-                "intelligent_interrupt_mute_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": False,
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "probability": 1.0,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
+                "intelligent_mute": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -1715,17 +1650,27 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "intelligent_interrupt_enabled": False,
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 30,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": 1.0,
-                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
-                "intelligent_interrupt_mute_enabled": False,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": False,
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "probability": 1.0,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
+                "intelligent_mute": {
+                    "enabled": False,
+                },
             },
             context=context,
         )
@@ -1768,7 +1713,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             (
                 "LLM request",
                 FakeContext(llm_error=RuntimeError("LLM unavailable")),
-                {"intelligent_interrupt_provider_id": "provider-a"},
+                {
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                    },
+                },
                 0,
                 1,
             ),
@@ -1777,7 +1726,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 FakeContext(
                     response=LLMResponse("err", completion_text="provider failure"),
                 ),
-                {"intelligent_interrupt_provider_id": "provider-a"},
+                {
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                    },
+                },
                 0,
                 1,
             ),
@@ -1786,7 +1739,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 FakeContext(
                     response=LLMResponse("assistant", completion_text="   "),
                 ),
-                {"intelligent_interrupt_provider_id": "provider-a"},
+                {
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                    },
+                },
                 0,
                 1,
             ),
@@ -1805,17 +1762,27 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 plugin = MemoryRepeater(
                     store,
                     {
-                        "repeat_threshold": 2,
-                        "interrupt_default_enabled": True,
-                        "interrupt_probability": 1.0,
-                        "interrupt_texts": ["打断！"],
-                        "intelligent_interrupt_enabled": False,
-                        "interrupt_mute_enabled": True,
-                        "interrupt_mute_duration_min": 30,
-                        "interrupt_mute_duration_max": 30,
-                        "interrupt_mute_probability": 1.0,
-                        "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
-                        "intelligent_interrupt_mute_enabled": True,
+                        "repeat": {
+                            "threshold": 2,
+                        },
+                        "interrupt": {
+                            "default_enabled": True,
+                            "probability": 1.0,
+                            "texts": ["打断！"],
+                        },
+                        "intelligent_interrupt": {
+                            "enabled": False,
+                        },
+                        "mute": {
+                            "enabled": True,
+                            "duration_min": 30,
+                            "duration_max": 30,
+                            "probability": 1.0,
+                            "texts": ["{user} 被禁言 {time}s"],
+                        },
+                        "intelligent_mute": {
+                            "enabled": True,
+                        },
                         **provider_config,
                     },
                     context=context,
@@ -1862,18 +1829,30 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "intelligent_interrupt_enabled": False,
-                "intelligent_interrupt_provider_id": "provider-a",
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 30,
-                "interrupt_mute_duration_max": 30,
-                "interrupt_mute_probability": 1.0,
-                "interrupt_mute_texts": ["{user} 被禁言 {time}s"],
-                "intelligent_interrupt_mute_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": False,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "probability": 1.0,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
+                "intelligent_mute": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -1933,12 +1912,18 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断！"],
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_probability": 1.0,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "mute": {
+                    "enabled": True,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -1963,12 +1948,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["打断甲", "打断乙", "打断丙"],
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断甲", "打断乙", "打断丙"],
+                },
             },
         )
         await plugin.initialize()
@@ -2000,13 +1989,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
-                "intelligent_interrupt_model": "model-b",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                    "model": "model-b",
+                },
             },
             context=context,
         )
@@ -2051,11 +2048,17 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -2095,11 +2098,17 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -2129,11 +2138,17 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": False,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": False,
+                },
             },
             context=context,
         )
@@ -2157,11 +2172,17 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
             },
             context=context,
         )
@@ -2197,12 +2218,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2236,12 +2265,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2269,12 +2306,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2309,12 +2354,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2359,12 +2412,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2403,12 +2464,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2463,12 +2532,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "interrupt_texts": ["随机后备"],
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["随机后备"],
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )
@@ -2514,12 +2591,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 0.1,
-                "interrupt_texts": ["不会发送"],
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 0.1,
+                    "texts": ["不会发送"],
+                },
             },
         )
         await plugin.initialize()
@@ -2571,9 +2652,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -2599,9 +2682,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -2633,9 +2718,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -2671,9 +2758,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -2707,9 +2796,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -2814,12 +2905,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "interrupt_default_enabled": True,
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_duration_min": 10,
-                "interrupt_mute_duration_max": 20,
-                "interrupt_mute_probability": 0.25,
-                "interrupt_mute_texts": ["甲", "乙"],
+                "interrupt": {
+                    "default_enabled": True,
+                },
+                "mute": {
+                    "enabled": True,
+                    "duration_min": 10,
+                    "duration_max": 20,
+                    "probability": 0.25,
+                    "texts": ["甲", "乙"],
+                },
             },
         )
         await plugin.initialize()
@@ -2837,8 +2932,10 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         disabled_plugin = MemoryRepeater(
             {},
             {
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_disabled_group_ids": ["disabled-status"],
+                "mute": {
+                    "enabled": True,
+                    "disabled_group_ids": ["disabled-status"],
+                },
             },
         )
         await disabled_plugin.initialize()
@@ -2851,8 +2948,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         parent_disabled_plugin = MemoryRepeater(
             {},
             {
-                "interrupt_default_enabled": False,
-                "interrupt_mute_enabled": True,
+                "interrupt": {
+                    "default_enabled": False,
+                },
+                "mute": {
+                    "enabled": True,
+                },
             },
         )
         await parent_disabled_plugin.initialize()
@@ -2867,8 +2968,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     async def test_toggle_permissions_and_config_lists(self) -> None:
         config = MemoryConfig(
             {
-                "default_enabled": True,
-                "interrupt_default_enabled": True,
+                "repeat": {
+                    "default_enabled": True,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                },
             }
         )
         plugin = MemoryRepeater({}, config)
@@ -2893,11 +2998,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             ["已在本群关闭打断复读。"],
         )
         self.assertEqual(
-            config["repeat_disabled_group_ids"],
+            config["repeat"]["disabled_group_ids"],
             ["managed"],
         )
         self.assertEqual(
-            config["interrupt_disabled_group_ids"],
+            config["interrupt"]["disabled_group_ids"],
             ["managed"],
         )
 
@@ -2905,7 +3010,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await run_command(plugin, member, "开启"), [PERMISSION_ERROR])
         self.assertEqual(config.save_count, saves_before_denial)
         self.assertEqual(
-            config["repeat_disabled_group_ids"],
+            config["repeat"]["disabled_group_ids"],
             ["managed"],
         )
 
@@ -2917,8 +3022,8 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             await run_interrupt_command(plugin, group_admin, "开启"),
             ["已在本群开启打断复读。"],
         )
-        self.assertEqual(config["repeat_disabled_group_ids"], [])
-        self.assertEqual(config["interrupt_disabled_group_ids"], [])
+        self.assertEqual(config["repeat"]["disabled_group_ids"], [])
+        self.assertEqual(config["interrupt"]["disabled_group_ids"], [])
 
     async def test_astrbot_admin_does_not_need_group_lookup(self) -> None:
         config = MemoryConfig()
@@ -2955,10 +3060,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
     async def test_configured_disabled_group_ids_apply_directly(self) -> None:
         config = MemoryConfig(
             {
-                "repeat_disabled_group_ids": ["configured"],
-                "interrupt_disabled_group_ids": ["configured"],
-                "interrupt_mute_enabled": True,
-                "interrupt_mute_disabled_group_ids": ["configured"],
+                "repeat": {
+                    "disabled_group_ids": ["configured"],
+                },
+                "interrupt": {
+                    "disabled_group_ids": ["configured"],
+                },
+                "mute": {
+                    "enabled": True,
+                    "disabled_group_ids": ["configured"],
+                },
             }
         )
         plugin = MemoryRepeater({}, config)
@@ -2968,9 +3079,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plugin.state_service.is_interrupt_enabled("configured", None))
         self.assertFalse(plugin.state_service.is_interrupt_mute_enabled("configured"))
         self.assertEqual(config.save_count, 0)
-        self.assertEqual(config["repeat_disabled_group_ids"], ["configured"])
-        self.assertEqual(config["interrupt_disabled_group_ids"], ["configured"])
-        self.assertEqual(config["interrupt_mute_disabled_group_ids"], ["configured"])
+        self.assertEqual(config["repeat"]["disabled_group_ids"], ["configured"])
+        self.assertEqual(config["interrupt"]["disabled_group_ids"], ["configured"])
+        self.assertEqual(config["mute"]["disabled_group_ids"], ["configured"])
 
     async def test_config_save_failure_restores_toggle_state(self) -> None:
         config = MemoryConfig()
@@ -2987,7 +3098,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         state = plugin.state_service.group_states["config-failure"]
         self.assertTrue(plugin.state_service.is_repeat_enabled("config-failure", state))
-        self.assertEqual(config["repeat_disabled_group_ids"], [])
+        self.assertEqual(config["repeat"]["disabled_group_ids"], [])
 
     async def test_command_save_failure_restores_group_state(self) -> None:
         store: dict = {}
@@ -3015,9 +3126,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "default_enabled": False,
-                "repeat_threshold": 3,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": False,
+                    "threshold": 3,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -3046,8 +3159,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": False,
-                "interrupt_default_enabled": False,
+                "repeat": {
+                    "default_enabled": False,
+                },
+                "interrupt": {
+                    "default_enabled": False,
+                },
             },
         )
         await plugin.initialize()
@@ -3083,8 +3200,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": False,
-                "interrupt_default_enabled": True,
+                "repeat": {
+                    "default_enabled": False,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                },
             },
         )
         await plugin.initialize()
@@ -3114,8 +3235,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             store,
             {
-                "default_enabled": False,
-                "interrupt_default_enabled": False,
+                "repeat": {
+                    "default_enabled": False,
+                },
+                "interrupt": {
+                    "default_enabled": False,
+                },
             },
         )
         await plugin.initialize()
@@ -3138,9 +3263,11 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "default_enabled": True,
-                "repeat_threshold": 2,
-                "repeat_probability": 1.0,
+                "repeat": {
+                    "default_enabled": True,
+                    "threshold": 2,
+                    "probability": 1.0,
+                },
             },
         )
         await plugin.initialize()
@@ -3570,8 +3697,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         )
         config = AsyncMemoryConfig(
             {
-                "intelligent_interrupt_provider_id": "provider-a",
-                "intelligent_interrupt_model": "zz-custom",
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                    "model": "zz-custom",
+                },
             },
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -3645,10 +3774,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     },
                 )
                 self.assertEqual(
-                    config["intelligent_interrupt_provider_id"],
+                    config["intelligent_provider"]["provider_id"],
                     "provider-b",
                 )
-                self.assertEqual(config["intelligent_interrupt_model"], "custom-model")
+                self.assertEqual(
+                    config["intelligent_provider"]["model"], "custom-model"
+                )
                 self.assertEqual(
                     plugin.state_service.settings.intelligent_interrupt_provider_id,
                     "provider-b",
@@ -3674,10 +3805,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         context = CatalogUnavailableContext()
         config = AsyncMemoryConfig(
             {
-                "intelligent_interrupt_provider_mode": "openai_compatible",
-                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000/v1",
-                "intelligent_interrupt_manual_api_key": original_key,
-                "intelligent_interrupt_model": "manual-model",
+                "intelligent_provider": {
+                    "mode": "openai_compatible",
+                    "manual_api_base": "http://127.0.0.1:8000/v1",
+                    "manual_api_key": original_key,
+                    "model": "manual-model",
+                },
             },
         )
         plugin = MemoryRepeater({}, config, context=context)
@@ -3712,7 +3845,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertNotIn(rotated_key, save_response.body.decode("utf-8"))
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 rotated_key,
             )
             with patch(
@@ -3730,7 +3863,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             preserve_payload = response_payload(preserve_response)
             self.assertTrue(preserve_payload["data"]["manual_api_key_configured"])
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 rotated_key,
             )
             self.assertNotIn(rotated_key, preserve_response.body.decode("utf-8"))
@@ -3774,7 +3907,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 astrbot_payload["data"]["manual_api_key_configured"],
             )
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 rotated_key,
             )
             self.assertNotIn(
@@ -3797,7 +3930,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 clear_response = await plugin._web_save_intelligent_console_config()
             clear_payload = response_payload(clear_response)
             self.assertFalse(clear_payload["data"]["manual_api_key_configured"])
-            self.assertEqual(config["intelligent_interrupt_manual_api_key"], "")
+            self.assertEqual(config["intelligent_provider"]["manual_api_key"], "")
             self.assertEqual(context.catalog_calls, 1)
             self.assertNotIn(original_key, clear_response.body.decode("utf-8"))
             self.assertNotIn(rotated_key, clear_response.body.decode("utf-8"))
@@ -3814,15 +3947,23 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 plugin = MemoryRepeater(
                     {},
                     {
-                        "repeat_threshold": 2,
-                        "interrupt_default_enabled": True,
-                        "interrupt_probability": 1.0,
-                        "interrupt_texts": ["static interrupt"],
-                        "intelligent_interrupt_enabled": True,
-                        "intelligent_interrupt_provider_mode": "openai_compatible",
-                        "intelligent_interrupt_manual_api_base": server.base_url,
-                        "intelligent_interrupt_manual_api_key": api_key,
-                        "intelligent_interrupt_model": "manual-model",
+                        "repeat": {
+                            "threshold": 2,
+                        },
+                        "interrupt": {
+                            "default_enabled": True,
+                            "probability": 1.0,
+                            "texts": ["static interrupt"],
+                        },
+                        "intelligent_interrupt": {
+                            "enabled": True,
+                        },
+                        "intelligent_provider": {
+                            "mode": "openai_compatible",
+                            "manual_api_base": server.base_url,
+                            "manual_api_key": api_key,
+                            "model": "manual-model",
+                        },
                     },
                     context=context,
                 )
@@ -3928,15 +4069,23 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 plugin = MemoryRepeater(
                     {},
                     {
-                        "repeat_threshold": 2,
-                        "interrupt_default_enabled": True,
-                        "interrupt_probability": 1.0,
-                        "interrupt_texts": ["static interrupt"],
-                        "intelligent_interrupt_enabled": True,
-                        "intelligent_interrupt_provider_mode": "openai_compatible",
-                        "intelligent_interrupt_manual_api_base": server.base_url,
-                        "intelligent_interrupt_manual_api_key": api_key,
-                        "intelligent_interrupt_model": "manual-model",
+                        "repeat": {
+                            "threshold": 2,
+                        },
+                        "interrupt": {
+                            "default_enabled": True,
+                            "probability": 1.0,
+                            "texts": ["static interrupt"],
+                        },
+                        "intelligent_interrupt": {
+                            "enabled": True,
+                        },
+                        "intelligent_provider": {
+                            "mode": "openai_compatible",
+                            "manual_api_base": server.base_url,
+                            "manual_api_key": api_key,
+                            "model": "manual-model",
+                        },
                     },
                     context=context,
                 )
@@ -3984,14 +4133,22 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin = MemoryRepeater(
                 {},
                 {
-                    "repeat_threshold": 2,
-                    "interrupt_default_enabled": True,
-                    "interrupt_probability": 1.0,
-                    "interrupt_texts": ["static interrupt"],
-                    "intelligent_interrupt_enabled": True,
-                    "intelligent_interrupt_provider_mode": "openai_compatible",
-                    "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
-                    "intelligent_interrupt_model": "manual-model",
+                    "repeat": {
+                        "threshold": 2,
+                    },
+                    "interrupt": {
+                        "default_enabled": True,
+                        "probability": 1.0,
+                        "texts": ["static interrupt"],
+                    },
+                    "intelligent_interrupt": {
+                        "enabled": True,
+                    },
+                    "intelligent_provider": {
+                        "mode": "openai_compatible",
+                        "manual_api_base": "http://127.0.0.1:8000",
+                        "model": "manual-model",
+                    },
                 },
                 context=context,
             )
@@ -4071,10 +4228,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "intelligent_interrupt_provider_mode": "openai_compatible",
-                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
-                "intelligent_interrupt_manual_api_key": "manual-api-key",
-                "intelligent_interrupt_model": "manual-model",
+                "intelligent_provider": {
+                    "mode": "openai_compatible",
+                    "manual_api_base": "http://127.0.0.1:8000",
+                    "manual_api_key": "manual-api-key",
+                    "model": "manual-model",
+                },
             },
             context=context,
         )
@@ -4158,10 +4317,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         replacement_key = "replacement-manual-api-key"
         config = MemoryConfig(
             {
-                "intelligent_interrupt_provider_mode": "openai_compatible",
-                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
-                "intelligent_interrupt_manual_api_key": original_key,
-                "intelligent_interrupt_model": "manual-model",
+                "intelligent_provider": {
+                    "mode": "openai_compatible",
+                    "manual_api_base": "http://127.0.0.1:8000",
+                    "manual_api_key": original_key,
+                    "model": "manual-model",
+                },
             },
         )
         config.fail_next_save = True
@@ -4190,13 +4351,17 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(replacement_key, response_body)
         self.assertNotIn(original_key, "\n".join(captured_logger.messages))
         self.assertNotIn(replacement_key, "\n".join(captured_logger.messages))
-        self.assertEqual(config["intelligent_interrupt_manual_api_key"], original_key)
+        self.assertEqual(config["intelligent_provider"]["manual_api_key"], original_key)
 
     async def test_config_snapshot_conflict_does_not_swap_runtime_settings(
         self,
     ) -> None:
         config = AsyncMemoryConfig(
-            {"intelligent_interrupt_provider_id": "provider-a"},
+            {
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
+            },
             committed=False,
         )
         plugin = MemoryRepeater({}, config, context=FakePageContext())
@@ -4219,11 +4384,13 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_private_config_commit_uses_the_committed_snapshot(self) -> None:
         config = SnapshotMemoryConfig(
             {
-                "intelligent_interrupt_provider_id": "old-provider",
-                "intelligent_interrupt_provider_mode": "astrbot",
-                "intelligent_interrupt_model": "old-model",
-                "intelligent_interrupt_manual_api_base": "",
-                "intelligent_interrupt_manual_api_key": "old-key",
+                "intelligent_provider": {
+                    "provider_id": "old-provider",
+                    "mode": "astrbot",
+                    "model": "old-model",
+                    "manual_api_base": "",
+                    "manual_api_key": "old-key",
+                },
             },
             mutate_after_write=True,
         )
@@ -4240,31 +4407,31 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertTrue(committed)
             self.assertEqual(
-                config.written_snapshots[-1]["intelligent_interrupt_provider_id"],
+                config.written_snapshots[-1]["intelligent_provider"]["provider_id"],
                 "saved-provider",
             )
             self.assertEqual(
-                config.written_snapshots[-1]["intelligent_interrupt_provider_mode"],
+                config.written_snapshots[-1]["intelligent_provider"]["mode"],
                 "openai_compatible",
             )
             self.assertEqual(
-                config.written_snapshots[-1]["intelligent_interrupt_manual_api_base"],
+                config.written_snapshots[-1]["intelligent_provider"]["manual_api_base"],
                 "https://saved.example/v1",
             )
             self.assertEqual(
-                config.written_snapshots[-1]["intelligent_interrupt_manual_api_key"],
+                config.written_snapshots[-1]["intelligent_provider"]["manual_api_key"],
                 "saved-key",
             )
             self.assertEqual(
-                config["intelligent_interrupt_provider_id"],
+                config["intelligent_provider"]["provider_id"],
                 "later-provider",
             )
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_base"],
+                config["intelligent_provider"]["manual_api_base"],
                 "https://later.example/v1",
             )
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 "later-key",
             )
             self.assertEqual(
@@ -4295,8 +4462,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         config = SnapshotMemoryConfig(
             {
-                "intelligent_interrupt_provider_id": "old-provider",
-                "intelligent_interrupt_model": "old-model",
+                "intelligent_provider": {
+                    "provider_id": "old-provider",
+                    "model": "old-model",
+                },
             },
         )
         plugin = MemoryRepeater({}, config, context=FakePageContext())
@@ -4312,7 +4481,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             save_count_before_toggle = config.save_count
             await plugin.state_service.set_repeat_enabled("persisted-group", False)
 
-            self.assertEqual(config["repeat_disabled_group_ids"], ["persisted-group"])
+            self.assertEqual(
+                config["repeat"]["disabled_group_ids"], ["persisted-group"]
+            )
             self.assertEqual(config.save_count, save_count_before_toggle + 1)
         finally:
             await plugin.terminate()
@@ -4322,11 +4493,13 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         config = SnapshotMemoryConfig(
             {
-                "intelligent_interrupt_provider_id": "old-provider",
-                "intelligent_interrupt_provider_mode": "astrbot",
-                "intelligent_interrupt_model": "old-model",
-                "intelligent_interrupt_manual_api_base": "",
-                "intelligent_interrupt_manual_api_key": "old-key",
+                "intelligent_provider": {
+                    "provider_id": "old-provider",
+                    "mode": "astrbot",
+                    "model": "old-model",
+                    "manual_api_base": "",
+                    "manual_api_key": "old-key",
+                },
             },
             committed=False,
             mutate_after_write=True,
@@ -4344,17 +4517,17 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(committed)
             self.assertEqual(
-                config["intelligent_interrupt_provider_id"],
+                config["intelligent_provider"]["provider_id"],
                 "old-provider",
             )
-            self.assertEqual(config["intelligent_interrupt_model"], "old-model")
+            self.assertEqual(config["intelligent_provider"]["model"], "old-model")
             self.assertEqual(
-                config["intelligent_interrupt_provider_mode"],
+                config["intelligent_provider"]["mode"],
                 "astrbot",
             )
-            self.assertEqual(config["intelligent_interrupt_manual_api_base"], "")
+            self.assertEqual(config["intelligent_provider"]["manual_api_base"], "")
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 "old-key",
             )
             self.assertEqual(
@@ -4385,11 +4558,13 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         config = BlockingAsyncMemoryConfig(
             {
-                "intelligent_interrupt_provider_id": "old-provider",
-                "intelligent_interrupt_provider_mode": "astrbot",
-                "intelligent_interrupt_model": "old-model",
-                "intelligent_interrupt_manual_api_base": "",
-                "intelligent_interrupt_manual_api_key": "old-key",
+                "intelligent_provider": {
+                    "provider_id": "old-provider",
+                    "mode": "astrbot",
+                    "model": "old-model",
+                    "manual_api_base": "",
+                    "manual_api_key": "old-key",
+                },
             },
         )
         plugin = MemoryRepeater({}, config, context=FakePageContext())
@@ -4413,20 +4588,20 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 await save_task
 
             self.assertEqual(
-                config["intelligent_interrupt_provider_id"],
+                config["intelligent_provider"]["provider_id"],
                 "saved-provider",
             )
-            self.assertEqual(config["intelligent_interrupt_model"], "saved-model")
+            self.assertEqual(config["intelligent_provider"]["model"], "saved-model")
             self.assertEqual(
-                config["intelligent_interrupt_provider_mode"],
+                config["intelligent_provider"]["mode"],
                 "openai_compatible",
             )
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_base"],
+                config["intelligent_provider"]["manual_api_base"],
                 "https://saved.example/v1",
             )
             self.assertEqual(
-                config["intelligent_interrupt_manual_api_key"],
+                config["intelligent_provider"]["manual_api_key"],
                 "saved-key",
             )
             self.assertEqual(
@@ -4466,8 +4641,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin = MemoryRepeater(
                 {},
                 {
-                    "intelligent_interrupt_provider_id": "provider-a",
-                    "intelligent_interrupt_model": "model-a",
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                        "model": "model-a",
+                    },
                 },
                 context=context,
             )
@@ -4533,7 +4710,11 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             plugin = MemoryRepeater(
                 {},
-                {"intelligent_interrupt_model": "model-a"},
+                {
+                    "intelligent_provider": {
+                        "model": "model-a",
+                    },
+                },
                 context=context,
             )
             store = IntelligentHistoryStore(
@@ -4571,8 +4752,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin = MemoryRepeater(
                 {},
                 {
-                    "intelligent_interrupt_provider_id": "missing-provider",
-                    "intelligent_interrupt_model": "model-a",
+                    "intelligent_provider": {
+                        "provider_id": "missing-provider",
+                        "model": "model-a",
+                    },
                 },
                 context=context,
             )
@@ -4666,8 +4849,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "intelligent_interrupt_provider_id": "provider-a",
-                "intelligent_interrupt_model": "model-a",
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                    "model": "model-a",
+                },
             },
             context=context,
         )
@@ -4715,13 +4900,21 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin = MemoryRepeater(
                 {},
                 {
-                    "repeat_threshold": 2,
-                    "interrupt_default_enabled": True,
-                    "interrupt_probability": 1.0,
-                    "interrupt_texts": ["静态后备"],
-                    "intelligent_interrupt_enabled": True,
-                    "intelligent_interrupt_provider_id": "provider-a",
-                    "intelligent_interrupt_model": "model-a",
+                    "repeat": {
+                        "threshold": 2,
+                    },
+                    "interrupt": {
+                        "default_enabled": True,
+                        "probability": 1.0,
+                        "texts": ["静态后备"],
+                    },
+                    "intelligent_interrupt": {
+                        "enabled": True,
+                    },
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                        "model": "model-a",
+                    },
                 },
                 context=context,
             )
@@ -4775,12 +4968,20 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin = MemoryRepeater(
                 {},
                 {
-                    "repeat_threshold": 2,
-                    "interrupt_default_enabled": True,
-                    "interrupt_probability": 1.0,
-                    "intelligent_interrupt_enabled": True,
-                    "intelligent_interrupt_provider_id": "provider-a",
-                    "intelligent_interrupt_model": "model-a",
+                    "repeat": {
+                        "threshold": 2,
+                    },
+                    "interrupt": {
+                        "default_enabled": True,
+                        "probability": 1.0,
+                    },
+                    "intelligent_interrupt": {
+                        "enabled": True,
+                    },
+                    "intelligent_provider": {
+                        "provider_id": "provider-a",
+                        "model": "model-a",
+                    },
                 },
                 context=context,
             )
@@ -4849,13 +5050,21 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "old-provider",
-                "intelligent_interrupt_model": "old-model",
-                "intelligent_interrupt_prompt": "old prompt",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                    "prompt": "old prompt",
+                },
+                "intelligent_provider": {
+                    "provider_id": "old-provider",
+                    "model": "old-model",
+                },
             },
             context=context,
         )
@@ -4896,11 +5105,19 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         plugin = MemoryRepeater(
             {},
             {
-                "repeat_threshold": 2,
-                "interrupt_default_enabled": True,
-                "interrupt_probability": 1.0,
-                "intelligent_interrupt_enabled": True,
-                "intelligent_interrupt_provider_id": "provider-a",
+                "repeat": {
+                    "threshold": 2,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                },
+                "intelligent_interrupt": {
+                    "enabled": True,
+                },
+                "intelligent_provider": {
+                    "provider_id": "provider-a",
+                },
             },
             context=context,
         )

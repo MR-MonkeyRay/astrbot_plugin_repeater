@@ -32,63 +32,61 @@
 
 ## 配置
 
-插件首次加载后，AstrBot 根据 `_conf_schema.json` 生成配置文件：
-配置页中，`description` 显示字段名称，`hint` 显示补充说明。字段与运行时验证均按“基础复读 → 打断复读 → 打断复读禁言 → 智能文案”排列；智能文案区域通过 `intelligent_interrupt_provider_mode`（智能文案供应商选择）下拉选择 AstrBot 或自定义，智能打断与智能禁言共用同一组连接和模型设置。
+插件首次加载后，AstrBot 根据 `_conf_schema.json` 生成配置文件。配置使用 AstrBot 推荐的 `object` 嵌套 Schema，按功能显示为六个独立区块：基础复读、打断复读、打断后禁言、智能文案服务、智能打断和智能禁言提示。`description` 是字段名称，`hint` 是补充说明。
 
-### 基础复读
+### 基础复读（`repeat`）
 
-- `default_enabled`：未单独设置过的群是否默认开启，默认 `true`。
-- `repeat_disabled_group_ids`：关闭复读的 QQ 群号列表，由开关指令自动更新。
-- `repeat_threshold`：触发所需独立用户数（含首位发送者），默认 `3`；配置页提供范围 `2`–`50`、步长 `1` 的滑块。
-- `repeat_probability`：达到阈值后每次尝试的触发概率，默认 `0.3`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
+- `repeat.default_enabled`：未单独设置过的群是否默认开启，默认 `true`。
+- `repeat.disabled_group_ids`：关闭复读的 QQ 群号列表，由开关指令自动更新。
+- `repeat.threshold`：触发所需独立用户数（含首位发送者），默认 `3`；配置页提供范围 `2`–`50`、步长 `1` 的滑块。
+- `repeat.probability`：达到复读条件且未命中打断时，回发原消息的概率，默认 `0.3`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
 
-### 打断复读
+### 打断复读（`interrupt`）
 
-- `interrupt_default_enabled`：未单独设置过的群是否默认开启打断，默认 `true`。
-- `interrupt_disabled_group_ids`：关闭打断复读的 QQ 群号列表，由开关指令自动更新。
-- `interrupt_probability`：达到阈值后优先打断的概率，默认 `0.1`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
-- `interrupt_texts`：命中打断时随机选择的文本列表；为空时使用默认文本 `打断！`。
+- `interrupt.default_enabled`：未单独设置过的群是否默认开启打断，默认 `true`。
+- `interrupt.disabled_group_ids`：关闭打断复读的 QQ 群号列表，由开关指令自动更新。
+- `interrupt.probability`：达到阈值后优先打断的概率，默认 `0.1`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
+- `interrupt.texts`：命中打断时随机选择的静态后备文本；为空时使用默认文本 `打断！`。
 
-### 打断复读禁言
+### 打断后禁言（`mute`）
 
-- `interrupt_mute_enabled`：是否启用打断复读禁言，默认 `false`。
-- `interrupt_mute_disabled_group_ids`：关闭打断复读禁言的 QQ 群号列表。
-- `interrupt_mute_probability`：打断复读后触发禁言的概率，默认 `0.05`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
-- `interrupt_mute_duration_min`：禁言时长下限（秒），默认 `1`；配置页提供范围 `1`–`3600` 秒、步长 `1` 秒的滑块。
-- `interrupt_mute_duration_max`：禁言时长上限（秒），默认 `15`；配置页提供范围 `1`–`3600` 秒、步长 `1` 秒的滑块。
-- `interrupt_mute_texts`：智能禁言提示关闭、不可用或生成失败时随机选择的静态后备文本；支持 `{user}`（被禁言用户）和 `{time}`（禁言秒数）占位符；为空时使用默认文本。
+- `mute.enabled`：是否启用打断复读禁言，默认 `false`。
+- `mute.disabled_group_ids`：关闭打断复读禁言的 QQ 群号列表。
+- `mute.probability`：打断复读后尝试禁言的概率，默认 `0.05`；配置页提供范围 `0%`–`100%`、步长 `1%` 的滑块。
+- `mute.duration_min` / `mute.duration_max`：随机禁言时长下限和上限（秒），默认 `1` / `15`；配置页提供范围 `1`–`3600` 秒、步长 `1` 秒的滑块。
+- `mute.texts`：智能禁言提示关闭、不可用或生成失败时随机选择的静态后备文本；支持 `{user}`（被禁言用户）和 `{time}`（禁言秒数）占位符；为空时使用默认文案。
 
-### 智能文案
+### 智能文案服务（`intelligent_provider`）
 
-- `intelligent_interrupt_provider_mode`：智能文案供应商选择，默认 `"astrbot"`；配置页提供 “AstrBot” 和“自定义”两个选项，选择自定义时保存 `"openai_compatible"`，并直连 OpenAI兼容 Chat Completions 服务，不依赖 AstrBot Agent 或聊天供应商目录。
-- `intelligent_interrupt_provider_id`：仅 `"astrbot"` 模式使用的 AstrBot 聊天供应商 ID，默认 `""`；在 **复读机 → 智能文案测试** 页面从已配置聊天供应商的下拉列表选择，留空则跟随触发会话当前供应商。
-- `intelligent_interrupt_manual_api_base`：自定义 OpenAI兼容 API Base URL；仅自定义 OpenAI兼容直连模式使用，默认 `""`。非空时必须是长度不超过 256 字符、带主机的绝对 `http` 或 `https` URL，不能含用户名、密码、查询串或片段，末尾 `/` 会被移除。通常应包含服务商要求的版本路径。
-- `intelligent_interrupt_manual_api_key`：仅自定义 OpenAI兼容直连模式使用的 Bearer API Key，默认 `""`；非空值去除首尾空白并限制为 512 字符。Key 会随插件配置保存；能够访问该配置的人员应视为可以读取它。Page 响应、智能历史和插件日志不会回显 Key。
-- `intelligent_interrupt_model`：两种模式共用的模型 ID，默认 `""`；AstrBot 模式留空时使用最终供应商默认模型，自定义 OpenAI兼容直连模式执行时必须填写，且不会枚举第三方服务的模型。
+- `intelligent_provider.mode`：智能文案供应商模式，默认 `"astrbot"`；可选 AstrBot 已配置聊天供应商或自定义 OpenAI 兼容服务（`"openai_compatible"`）。
+- `intelligent_provider.provider_id`：仅 AstrBot 模式使用的聊天供应商 ID；留空时跟随触发会话。可在 **复读机 → 智能文案测试** 页面选择。
+- `intelligent_provider.manual_api_base`：仅自定义模式使用的 OpenAI 兼容 API Base URL。非空时必须是长度不超过 256 字符、带主机的绝对 `http` 或 `https` URL，不能含用户名、密码、查询串或片段，末尾 `/` 会被移除。
+- `intelligent_provider.manual_api_key`：仅自定义模式使用的 Bearer API Key。Key 会随插件配置保存；能够访问该配置的人员应视为可以读取它。Page 响应、智能历史和插件日志不会回显 Key。
+- `intelligent_provider.model`：两种模式共用的模型 ID。AstrBot 模式可留空以使用最终供应商默认模型；自定义模式必须填写，且不会枚举第三方服务的模型。
+
+### 智能打断（`intelligent_interrupt`）
+
+- `intelligent_interrupt.enabled`：是否在打断命中时使用 LLM 生成主打断文本，默认 `false`。
+- `intelligent_interrupt.prompt`：智能打断的 LLM 系统提示词；空值或非字符串会回退到内置默认提示词。
+
+### 智能禁言提示（`intelligent_mute`）
+
+- `intelligent_mute.enabled`：是否在禁言 API 成功时使用 LLM 生成禁言提示，默认 `false`。
+- `intelligent_mute.prompt`：智能禁言提示的 LLM 系统提示词；空值或非字符串会回退到内置默认提示词。
 
 #### 智能文案测试页面
 
-在 AstrBot WebUI 打开 **复读机 → 智能文案测试**。按模式保存共享连接与模型，再分别运行智能打断或智能禁言提示测试；页面会展示两个智能功能当前是否启用，但测试不受开关影响，以便验证已保存的设置和对应提示词。
+在 AstrBot WebUI 打开 **复读机 → 智能文案测试**。按模式保存 `intelligent_provider` 中的共享连接和模型，再分别运行智能打断或智能禁言提示测试；页面会展示两个智能功能当前是否启用，但测试不受开关影响，以便验证已保存的设置和对应提示词。
 
 - AstrBot 模式下，供应商留空时生产消息仍会跟随触发会话的聊天供应商；页面没有真实群消息的 UMO，因此会明确拒绝测试，不会私自改用默认供应商。
-- 自定义 OpenAI兼容直连模式不查询 AstrBot 供应商或模型目录。必须同时填写 API Base URL、API Key 与模型；缺少任一项时页面测试返回配置错误而不发起网络请求，运行时改用静态后备文案。
+- 自定义 OpenAI 兼容直连模式不查询 AstrBot 供应商或模型目录。必须同时填写 API Base URL、API Key 与模型；缺少任一项时页面测试返回配置错误而不发起网络请求，运行时改用静态后备文案。
 - 页面加载后 API Key 输入框始终为空。保存时不填写 Key 会保留现有值，填写非空值会轮换 Key，点击“清除 Key”会删除它；Page GET/POST 响应绝不返回 Key。
 - 智能打断测试使用固定模拟复读内容；智能禁言提示测试使用“测试用户 / 60 秒”。两者只向当前 WebUI 返回生成结果，绝不发送群消息、调用 `set_group_ban` 或修改复读状态。直连成功的结果与历史使用固定供应商标签 `manual-openai-compatible`，不记录 API Base URL 或 Key。
 - 页面显示当天、过去 24 小时、2 天、3 天和 7 天的智能打断/禁言记录，并可按类型筛选和翻页。点击一条记录可展开查看复读内容、LLM 请求与回复、复读人数等详情；切换到另一条记录会自动收起已展开的详情。当天从 AstrBot 运行环境本地时区的午夜开始；其余范围为滚动时间窗。
 - 记录数据库位于 `data/plugin_data/astrbot_plugin_repeater/intelligent_history.sqlite3`。保存时间、来源、动作、结果、供应商/模型、群 ID（运行时）、禁言时长、耗时、安全失败码、复读内容、LLM 请求与回复，以及已计入本次复读的不同用户数。调用内容可能包含群消息或提示中的用户信息，能够访问此页的人员应视为可以读取这些内容；不单独保存发送者 ID、异常详情、API Base URL 或凭据。后台每小时删除严格早于七天的记录，恰好位于七天边界的记录会保留。
 
-#### 智能打断
+打断与普通复读互斥：命中打断后，智能打断关闭时使用 `interrupt.texts`；开启后生成成功时使用智能文本，供应商解析或请求失败、收到非助手响应或空响应时使用同一静态后备。自定义 OpenAI 兼容直连模式缺少 API Base URL、API Key 或模型时不会发起网络请求，并以 `provider_resolution_failed` 记录安全失败元数据后使用静态后备。生成在发送前取消时不发送文本并尝试回滚，回滚保存成功时允许重试、回滚保存失败时继续抑制。未命中打断时，才按 `repeat.probability` 尝试普通复读。
 
-- `intelligent_interrupt_enabled`：是否在打断命中时使用 LLM 生成主打断文本，默认 `false`。
-- `intelligent_interrupt_prompt`：智能打断的 LLM 系统提示词，默认 `你是友善、机智的群聊复读打断助手。根据用户反复发送的内容，只生成一条简短、有趣、适合群聊的打断语。可以复读、打乱顺序或合理开玩笑；不得辱骂、歧视、威胁、露骨或攻击个人。不要解释、不要加引号、不要输出前缀。`；空值或非字符串会回退到此默认提示词。
+启用禁言后，插件会在打断复读后按 `mute.probability` 尝试禁言，禁言时长在 `mute.duration_min` 与 `mute.duration_max` 之间随机选择。禁言操作仅在机器人是该群群主或管理员时可执行；缺少该权限时不会执行禁言。只有禁言 API 成功且 `intelligent_mute.enabled` 开启时才生成智能提示；供应商解析、自定义 OpenAI 兼容直连配置不完整、请求、非助手响应或空响应失败时，发送一条已填充占位符的静态后备文本。
 
-#### 智能禁言提示
-
-- `intelligent_interrupt_mute_enabled`：是否在禁言 API 成功时使用 LLM 生成禁言提示，默认 `false`。
-- `intelligent_interrupt_mute_prompt`：智能禁言提示的 LLM 系统提示词，默认 `你是友善、机智的群聊禁言通知助手。根据提供的被禁言用户和禁言时长，只生成一条简短、有趣、适合群聊的禁言提示。不得辱骂、歧视、威胁、露骨或攻击个人。必须保留用户名称和禁言时长；不要解释、不要加引号、不要输出前缀。`；空值或非字符串会回退到此默认提示词。
-
-打断与普通复读互斥：命中打断后，智能打断关闭时使用随机打断文本；开启后生成成功时使用智能文本，供应商解析或请求失败、收到非助手响应或空响应时使用随机打断文本。自定义 OpenAI兼容直连模式缺少 API Base URL、API Key 或模型时不会发起网络请求，并以 `provider_resolution_failed` 记录安全失败元数据后使用同一静态后备。生成在发送前取消时不发送文本并尝试回滚，回滚保存成功时允许重试、回滚保存失败时继续抑制。未命中打断时，才按 `repeat_probability` 尝试普通复读。
-
-启用禁言后，插件会在打断复读后按 `interrupt_mute_probability` 尝试禁言，禁言时长在 `interrupt_mute_duration_min` 与 `interrupt_mute_duration_max` 之间随机选择。禁言操作仅在机器人是该群群主或管理员时可执行；缺少该权限时不会执行禁言。只有禁言 API 成功且 `intelligent_interrupt_mute_enabled` 开启时才生成智能提示；供应商解析、自定义 OpenAI兼容直连配置不完整、请求、非助手响应或空响应失败时，发送一条已填充占位符的静态后备文本。
-
-通过智能文案测试页面保存的模式、AstrBot 供应商、自定义 OpenAI兼容直连配置和共享模型会作为一个运行时配置快照立即替换；其余配置页字段按 AstrBot 的插件重载规则生效。
+通过智能文案测试页面保存的 `intelligent_provider` 配置会作为一个运行时配置快照立即替换；其余配置页字段按 AstrBot 的插件重载规则生效。

@@ -21,6 +21,13 @@ INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE = "openai_compatible"
 INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH = 256
 INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH = 512
 
+CONFIG_SECTION_REPEAT = "repeat"
+CONFIG_SECTION_INTERRUPT = "interrupt"
+CONFIG_SECTION_MUTE = "mute"
+CONFIG_SECTION_INTELLIGENT_PROVIDER = "intelligent_provider"
+CONFIG_SECTION_INTELLIGENT_INTERRUPT = "intelligent_interrupt"
+CONFIG_SECTION_INTELLIGENT_MUTE = "intelligent_mute"
+
 
 @dataclass(slots=True)
 class RepeaterSettings:
@@ -64,14 +71,25 @@ class RepeaterSettings:
     intelligent_interrupt_mute_prompt: str
 
     def save_config(self) -> None:
-        """将禁用群列表写回配置，并触发配置对象的保存钩子。"""
-        self.config["repeat_disabled_group_ids"] = sorted(
-            self.repeat_disabled_group_ids,
-        )
-        self.config["interrupt_disabled_group_ids"] = sorted(
+        """将群级开关写回分组配置，并触发配置对象的保存钩子。"""
+        repeat_config = self.config.get(CONFIG_SECTION_REPEAT)
+        if not isinstance(repeat_config, dict):
+            repeat_config = {}
+            self.config[CONFIG_SECTION_REPEAT] = repeat_config
+        interrupt_config = self.config.get(CONFIG_SECTION_INTERRUPT)
+        if not isinstance(interrupt_config, dict):
+            interrupt_config = {}
+            self.config[CONFIG_SECTION_INTERRUPT] = interrupt_config
+        mute_config = self.config.get(CONFIG_SECTION_MUTE)
+        if not isinstance(mute_config, dict):
+            mute_config = {}
+            self.config[CONFIG_SECTION_MUTE] = mute_config
+
+        repeat_config["disabled_group_ids"] = sorted(self.repeat_disabled_group_ids)
+        interrupt_config["disabled_group_ids"] = sorted(
             self.interrupt_disabled_group_ids,
         )
-        self.config["interrupt_mute_disabled_group_ids"] = sorted(
+        mute_config["disabled_group_ids"] = sorted(
             self.interrupt_mute_disabled_group_ids,
         )
         save_config = getattr(self.config, "save_config", None)
@@ -79,132 +97,175 @@ class RepeaterSettings:
             save_config()
 
 
+def _config_section(
+    config: dict[str, Any],
+    section_name: str,
+    logger: Any,
+) -> dict[str, Any]:
+    """Return one validated configuration section without allocating on success."""
+    section = config.get(section_name, {})
+    if isinstance(section, dict):
+        return section
+    logger.warning(f"[repeater] {section_name} 配置块非法，使用默认配置")
+    return {}
+
+
 def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
-    """验证外部插件配置并构造运行时策略。"""
+    """验证分组插件配置并构造运行时策略。"""
+    repeat_config = _config_section(config, CONFIG_SECTION_REPEAT, logger)
+    interrupt_config = _config_section(config, CONFIG_SECTION_INTERRUPT, logger)
+    mute_config = _config_section(config, CONFIG_SECTION_MUTE, logger)
+    intelligent_provider_config = _config_section(
+        config,
+        CONFIG_SECTION_INTELLIGENT_PROVIDER,
+        logger,
+    )
+    intelligent_interrupt_config = _config_section(
+        config,
+        CONFIG_SECTION_INTELLIGENT_INTERRUPT,
+        logger,
+    )
+    intelligent_mute_config = _config_section(
+        config,
+        CONFIG_SECTION_INTELLIGENT_MUTE,
+        logger,
+    )
+
     # 基础复读
     default_enabled = _validated_bool(
-        config.get("default_enabled", True), "default_enabled", True, logger
+        repeat_config.get("default_enabled", True),
+        "repeat.default_enabled",
+        True,
+        logger,
     )
     repeat_disabled_group_ids = _load_group_ids(
-        config.get("repeat_disabled_group_ids", []),
-        "repeat_disabled_group_ids",
+        repeat_config.get("disabled_group_ids", []),
+        "repeat.disabled_group_ids",
         logger,
     )
     threshold = _validated_integer(
-        config.get("repeat_threshold", 3), "repeat_threshold", 3, 2, logger
+        repeat_config.get("threshold", 3),
+        "repeat.threshold",
+        3,
+        2,
+        logger,
     )
     probability = _validated_probability(
-        config.get("repeat_probability", 0.3), "repeat_probability", 0.3, logger
+        repeat_config.get("probability", 0.3),
+        "repeat.probability",
+        0.3,
+        logger,
     )
 
     # 打断复读
     interrupt_default_enabled = _validated_bool(
-        config.get("interrupt_default_enabled", True),
-        "interrupt_default_enabled",
+        interrupt_config.get("default_enabled", True),
+        "interrupt.default_enabled",
         True,
         logger,
     )
     interrupt_disabled_group_ids = _load_group_ids(
-        config.get("interrupt_disabled_group_ids", []),
-        "interrupt_disabled_group_ids",
+        interrupt_config.get("disabled_group_ids", []),
+        "interrupt.disabled_group_ids",
         logger,
     )
     interrupt_probability = _validated_probability(
-        config.get("interrupt_probability", 0.1),
-        "interrupt_probability",
+        interrupt_config.get("probability", 0.1),
+        "interrupt.probability",
         0.1,
         logger,
     )
     interrupt_texts = _validated_texts(
-        config.get("interrupt_texts", (DEFAULT_INTERRUPT_TEXT,)),
+        interrupt_config.get("texts", (DEFAULT_INTERRUPT_TEXT,)),
         DEFAULT_INTERRUPT_TEXT,
-        "[repeater] interrupt_texts 非法或为空，回退为默认打断文本",
+        "[repeater] interrupt.texts 非法或为空，回退为默认打断文本",
         logger,
     )
 
-    # 打断复读禁言
+    # 打断后禁言
     interrupt_mute_enabled = _validated_bool(
-        config.get("interrupt_mute_enabled", False),
-        "interrupt_mute_enabled",
+        mute_config.get("enabled", False),
+        "mute.enabled",
         False,
         logger,
     )
     interrupt_mute_disabled_group_ids = _load_group_ids(
-        config.get("interrupt_mute_disabled_group_ids", []),
-        "interrupt_mute_disabled_group_ids",
+        mute_config.get("disabled_group_ids", []),
+        "mute.disabled_group_ids",
         logger,
     )
     interrupt_mute_probability = _validated_probability(
-        config.get("interrupt_mute_probability", 0.05),
-        "interrupt_mute_probability",
+        mute_config.get("probability", 0.05),
+        "mute.probability",
         0.05,
         logger,
     )
     duration_min = _validated_duration(
-        config.get("interrupt_mute_duration_min", 1),
-        "interrupt_mute_duration_min",
+        mute_config.get("duration_min", 1),
+        "mute.duration_min",
         1,
         logger,
     )
     duration_max = _validated_duration(
-        config.get("interrupt_mute_duration_max", 15),
-        "interrupt_mute_duration_max",
+        mute_config.get("duration_max", 15),
+        "mute.duration_max",
         15,
         logger,
     )
     if duration_max < duration_min:
         logger.warning(
-            "[repeater] interrupt_mute_duration_max 小于 "
-            "interrupt_mute_duration_min，使用下限值",
+            "[repeater] mute.duration_max 小于 mute.duration_min，使用下限值",
         )
         duration_max = duration_min
     interrupt_mute_texts = _validated_texts(
-        config.get("interrupt_mute_texts", (DEFAULT_INTERRUPT_MUTE_TEXT,)),
+        mute_config.get("texts", (DEFAULT_INTERRUPT_MUTE_TEXT,)),
         DEFAULT_INTERRUPT_MUTE_TEXT,
-        "[repeater] interrupt_mute_texts 非法或为空，回退为默认禁言文本",
+        "[repeater] mute.texts 非法或为空，回退为默认禁言文本",
         logger,
     )
 
-    # 智能文案共用
-    intelligent_interrupt_provider_mode = _validated_intelligent_interrupt_provider_mode(
-        config.get(
-            "intelligent_interrupt_provider_mode",
-            INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
-        ),
-        logger,
+    # 智能文案服务
+    intelligent_interrupt_provider_mode = (
+        _validated_intelligent_interrupt_provider_mode(
+            intelligent_provider_config.get(
+                "mode",
+                INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+            ),
+            logger,
+        )
     )
     intelligent_interrupt_provider_id = _validated_optional_text(
-        config.get("intelligent_interrupt_provider_id", ""),
-        "intelligent_interrupt_provider_id",
+        intelligent_provider_config.get("provider_id", ""),
+        "intelligent_provider.provider_id",
         logger,
     )
     intelligent_interrupt_manual_api_base = _validated_manual_api_base(
-        config.get("intelligent_interrupt_manual_api_base", ""),
+        intelligent_provider_config.get("manual_api_base", ""),
         logger,
     )
     intelligent_interrupt_manual_api_key = _validated_manual_api_key(
-        config.get("intelligent_interrupt_manual_api_key", ""),
+        intelligent_provider_config.get("manual_api_key", ""),
         logger,
     )
     intelligent_interrupt_model = _validated_optional_text(
-        config.get("intelligent_interrupt_model", ""),
-        "intelligent_interrupt_model",
+        intelligent_provider_config.get("model", ""),
+        "intelligent_provider.model",
         logger,
     )
 
     # 智能打断
     intelligent_interrupt_enabled = _validated_bool(
-        config.get("intelligent_interrupt_enabled", False),
-        "intelligent_interrupt_enabled",
+        intelligent_interrupt_config.get("enabled", False),
+        "intelligent_interrupt.enabled",
         False,
         logger,
     )
     intelligent_interrupt_prompt = _validated_required_text(
-        config.get(
-            "intelligent_interrupt_prompt",
+        intelligent_interrupt_config.get(
+            "prompt",
             DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         ),
-        "intelligent_interrupt_prompt",
+        "intelligent_interrupt.prompt",
         DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         logger,
         "智能打断",
@@ -212,17 +273,17 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
 
     # 智能禁言提示
     intelligent_interrupt_mute_enabled = _validated_bool(
-        config.get("intelligent_interrupt_mute_enabled", False),
-        "intelligent_interrupt_mute_enabled",
+        intelligent_mute_config.get("enabled", False),
+        "intelligent_mute.enabled",
         False,
         logger,
     )
     intelligent_interrupt_mute_prompt = _validated_required_text(
-        config.get(
-            "intelligent_interrupt_mute_prompt",
+        intelligent_mute_config.get(
+            "prompt",
             DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
         ),
-        "intelligent_interrupt_mute_prompt",
+        "intelligent_mute.prompt",
         DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
         logger,
         "智能禁言",
@@ -254,7 +315,6 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         intelligent_interrupt_mute_enabled=intelligent_interrupt_mute_enabled,
         intelligent_interrupt_mute_prompt=intelligent_interrupt_mute_prompt,
     )
-
 
 
 def normalize_intelligent_interrupt_provider_mode(value: Any) -> str:
