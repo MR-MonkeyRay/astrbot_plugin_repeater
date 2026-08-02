@@ -4,19 +4,42 @@
       "title": "智能文案测试",
       "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
       "heading": "智能文案测试",
-      "intro": "保存共享供应商与模型，执行无副作用的文案测试，并查看七日内记录。",
+      "intro": "保存共享路由、供应商与模型，执行无副作用的文案测试，并查看七日内记录。",
       "configuration": {
         "kicker": "共享配置",
-        "title": "供应商与模型",
+        "title": "供应商路由与模型",
+        "mode": {
+          "label": "生成路由",
+          "astrbot": "AstrBot 聊天供应商",
+          "openai_compatible": "OpenAI-compatible 直连",
+          "astrbot_help": "使用 AstrBot 已配置的聊天供应商；留空供应商会跟随触发会话。",
+          "manual_help": "直连兼容服务，不依赖 AstrBot 聊天供应商目录。"
+        },
         "provider": {
           "label": "聊天供应商",
           "empty": "留空：跟随触发会话",
           "help": "留空会跟随触发群消息的会话；该模式不能从页面执行测试。"
         },
+        "manual_api_base": {
+          "label": "API Base URL",
+          "placeholder": "例如 http://localhost:8000/v1",
+          "help": "仅直连模式使用。填写兼容服务的根路径（可包含服务要求的版本路径）。"
+        },
+        "manual_api_key": {
+          "label": "API Key",
+          "placeholder": "留空以保留已保存的 Key",
+          "help": "仅直连模式使用；Key 会随插件配置保存，页面不会回显它。",
+          "configured": "已保存；页面不会显示 Key。",
+          "not_configured": "尚未保存 API Key。",
+          "clear": "清除已保存的 Key",
+          "clear_confirm": "清除已保存的 API Key？此操作会立即保存配置，且无法撤销。"
+        },
         "model": {
           "label": "模型 ID",
-          "placeholder": "留空使用供应商默认模型",
+          "placeholder": "AstrBot 模式留空使用供应商默认模型",
+          "manual_placeholder": "直连模式必须填写模型 ID",
           "help": "从候选列表选择，或输入未枚举的自定义模型 ID。",
+          "manual_help": "直连模式必须填写模型 ID；不会自动枚举第三方模型。",
           "loading": "正在读取模型候选…",
           "unavailable": "模型候选暂不可用，仍可手动输入模型 ID。"
         },

@@ -109,24 +109,42 @@
     "hint": "智能禁言提示关闭、不可用或生成失败时随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空使用默认文案。"
   },
 
+  "intelligent_interrupt_provider_mode": {
+    "type": "string",
+    "default": "astrbot",
+    "description": "智能文案供应商模式",
+    "hint": "决定智能打断和智能禁言提示的生成路由：选择 AstrBot 使用已配置的聊天供应商；选择 OpenAI-compatible 则直连手动配置的服务。"
+  },
   "intelligent_interrupt_provider_id": {
     "type": "string",
     "default": "",
     "_special": "select_provider",
-    "description": "智能文案供应商 ID",
-    "hint": "可在“智能文案测试”页面从下拉列表选择已配置的聊天供应商；手动编辑配置文件时填写其 ID。用于智能打断和智能禁言提示；留空跟随触发会话，页面无法直接测试该模式。"
+    "description": "智能文案 AstrBot 供应商 ID",
+    "hint": "仅 AstrBot 模式使用。可在“智能文案测试”页面从下拉列表选择已配置的聊天供应商；手动编辑配置文件时填写其 ID。留空跟随触发会话，页面无法直接测试该模式。"
+  },
+  "intelligent_interrupt_manual_api_base": {
+    "type": "string",
+    "default": "",
+    "description": "手动 OpenAI-compatible API Base URL",
+    "hint": "仅 OpenAI-compatible 直连模式使用。填写兼容服务的根路径（可含服务所需版本路径），例如 http://localhost:8000/v1；不支持嵌入账号/密码、查询串或片段。"
+  },
+  "intelligent_interrupt_manual_api_key": {
+    "type": "string",
+    "default": "",
+    "description": "手动 OpenAI-compatible API Key",
+    "hint": "仅 OpenAI-compatible 直连模式使用。会随插件配置保存；“智能文案测试”页面不会回显已保存的 Key。"
   },
   "intelligent_interrupt_model": {
     "type": "string",
     "default": "",
     "description": "智能文案模型",
-    "hint": "可在“智能文案测试”页面从所选供应商的候选列表选择，或手动输入未枚举的模型 ID；用于智能打断和智能禁言提示；留空使用最终供应商的默认模型。"
+    "hint": "用于智能打断和智能禁言提示；AstrBot 模式留空使用最终供应商的默认模型；OpenAI-compatible 直连模式必须填写，且不会自动枚举第三方模型。"
   },
   "intelligent_interrupt_enabled": {
     "type": "bool",
     "default": false,
     "description": "智能打断复读",
-    "hint": "开启后，打断命中时使用 AstrBot 已配置的聊天供应商生成一条打断文案；默认关闭。"
+    "hint": "开启后，打断命中时按共享供应商模式生成一条打断文案；默认关闭。"
   },
   "intelligent_interrupt_prompt": {
     "type": "text",
@@ -138,7 +156,7 @@
     "type": "bool",
     "default": false,
     "description": "智能禁言提示",
-    "hint": "开启后，禁言成功时使用与智能打断相同的聊天供应商和模型生成一条提示文案；默认关闭。"
+    "hint": "开启后，禁言成功时按与智能打断共用的供应商模式和模型生成一条提示文案；默认关闭。"
   },
   "intelligent_interrupt_mute_prompt": {
     "type": "text",

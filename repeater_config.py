@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 
 DEFAULT_INTERRUPT_TEXT = "打断！"
@@ -14,6 +15,11 @@ DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT = (
     "你是友善、机智的群聊禁言通知助手。根据提供的被禁言用户和禁言时长，只生成一条简短、有趣、适合群聊的禁言提示。"
     "不得辱骂、歧视、威胁、露骨或攻击个人。必须保留用户名称和禁言时长；不要解释、不要加引号、不要输出前缀。"
 )
+
+INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT = "astrbot"
+INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE = "openai_compatible"
+INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH = 256
+INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH = 512
 
 
 @dataclass(slots=True)
@@ -43,7 +49,10 @@ class RepeaterSettings:
     interrupt_mute_texts: tuple[str, ...]
 
     # 智能文案共用
+    intelligent_interrupt_provider_mode: str
     intelligent_interrupt_provider_id: str
+    intelligent_interrupt_manual_api_base: str
+    intelligent_interrupt_manual_api_key: str
     intelligent_interrupt_model: str
 
     # 智能打断
@@ -157,9 +166,24 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
     )
 
     # 智能文案共用
+    intelligent_interrupt_provider_mode = _validated_intelligent_interrupt_provider_mode(
+        config.get(
+            "intelligent_interrupt_provider_mode",
+            INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+        ),
+        logger,
+    )
     intelligent_interrupt_provider_id = _validated_optional_text(
         config.get("intelligent_interrupt_provider_id", ""),
         "intelligent_interrupt_provider_id",
+        logger,
+    )
+    intelligent_interrupt_manual_api_base = _validated_manual_api_base(
+        config.get("intelligent_interrupt_manual_api_base", ""),
+        logger,
+    )
+    intelligent_interrupt_manual_api_key = _validated_manual_api_key(
+        config.get("intelligent_interrupt_manual_api_key", ""),
         logger,
     )
     intelligent_interrupt_model = _validated_optional_text(
@@ -220,13 +244,105 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         interrupt_mute_duration_min=duration_min,
         interrupt_mute_duration_max=duration_max,
         interrupt_mute_texts=interrupt_mute_texts,
+        intelligent_interrupt_provider_mode=intelligent_interrupt_provider_mode,
         intelligent_interrupt_provider_id=intelligent_interrupt_provider_id,
+        intelligent_interrupt_manual_api_base=intelligent_interrupt_manual_api_base,
+        intelligent_interrupt_manual_api_key=intelligent_interrupt_manual_api_key,
         intelligent_interrupt_model=intelligent_interrupt_model,
         intelligent_interrupt_enabled=intelligent_interrupt_enabled,
         intelligent_interrupt_prompt=intelligent_interrupt_prompt,
         intelligent_interrupt_mute_enabled=intelligent_interrupt_mute_enabled,
         intelligent_interrupt_mute_prompt=intelligent_interrupt_mute_prompt,
     )
+
+
+
+def normalize_intelligent_interrupt_provider_mode(value: Any) -> str:
+    """将智能文案供应商模式规范化为受支持的值。"""
+    if isinstance(value, str):
+        mode = value.strip()
+        if mode in {
+            INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+            INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE,
+        }:
+            return mode
+    return INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT
+
+
+def normalize_intelligent_interrupt_manual_api_base(value: Any) -> str | None:
+    """规范化 OpenAI-compatible Base URL；非法输入返回 ``None``。"""
+    if not isinstance(value, str):
+        return None
+
+    api_base = value.strip()
+    if not api_base:
+        return ""
+    if (
+        len(api_base) > INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH
+        or any(character.isspace() for character in api_base)
+        or "?" in api_base
+        or "#" in api_base
+    ):
+        return None
+
+    try:
+        parsed = urlsplit(api_base)
+        _ = parsed.port
+    except ValueError:
+        return None
+
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.netloc.rsplit("@", 1)[-1].endswith(":")
+    ):
+        return None
+    return api_base.rstrip("/")
+
+
+def normalize_intelligent_interrupt_manual_api_key(value: Any) -> str | None:
+    """规范化手动供应商 API Key；非法输入返回 ``None``。"""
+    if not isinstance(value, str):
+        return None
+
+    api_key = value.strip()
+    if len(api_key) > INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH:
+        return None
+    return api_key
+
+
+def _validated_intelligent_interrupt_provider_mode(value: Any, logger: Any) -> str:
+    mode = normalize_intelligent_interrupt_provider_mode(value)
+    if isinstance(value, str) and value.strip() == mode:
+        return mode
+    logger.warning(
+        "[repeater] intelligent_interrupt_provider_mode is invalid; using astrbot",
+    )
+    return mode
+
+
+def _validated_manual_api_base(value: Any, logger: Any) -> str:
+    api_base = normalize_intelligent_interrupt_manual_api_base(value)
+    if api_base is not None:
+        return api_base
+    logger.warning(
+        "[repeater] intelligent_interrupt_manual_api_base is invalid; "
+        "treating as unconfigured",
+    )
+    return ""
+
+
+def _validated_manual_api_key(value: Any, logger: Any) -> str:
+    api_key = normalize_intelligent_interrupt_manual_api_key(value)
+    if api_key is not None:
+        return api_key
+    logger.warning(
+        "[repeater] intelligent_interrupt_manual_api_key is invalid; "
+        "treating as unconfigured",
+    )
+    return ""
 
 
 def _validated_integer(

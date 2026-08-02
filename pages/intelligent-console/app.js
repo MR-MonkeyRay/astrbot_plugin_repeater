@@ -6,6 +6,11 @@
   const state = {
     context: null,
     providerCatalogAvailable: true,
+    providerCatalogLoading: false,
+    providerCatalogRequestId: 0,
+    providerMode: "astrbot",
+    manualApiKeyConfigured: false,
+    manualApiKeyClearRequested: false,
     configurationLoaded: false,
     history: {
       window: "day",
@@ -18,7 +23,16 @@
   };
 
   const elements = {
+    mode: document.querySelector("#provider-mode"),
+    modeHelp: document.querySelector("#provider-mode-help"),
+    providerField: document.querySelector("#astrbot-provider-field"),
     provider: document.querySelector("#provider-select"),
+    manualApiBaseField: document.querySelector("#manual-api-base-field"),
+    manualApiKeyField: document.querySelector("#manual-api-key-field"),
+    manualApiBase: document.querySelector("#manual-api-base-input"),
+    manualApiKey: document.querySelector("#manual-api-key-input"),
+    manualApiKeyStatus: document.querySelector("#manual-api-key-status"),
+    clearManualApiKey: document.querySelector("#clear-manual-api-key"),
     model: document.querySelector("#model-input"),
     models: document.querySelector("#model-options"),
     modelHelp: document.querySelector("#model-help"),
@@ -96,11 +110,66 @@
     return bridge.apiPost(endpoint, body);
   }
 
+  function isManualProviderMode() {
+    return state.providerMode === "openai_compatible";
+  }
+
+  function updateManualApiKeyStatus() {
+    elements.manualApiKeyStatus.textContent = state.manualApiKeyConfigured
+      ? translate(
+        "configuration.manual_api_key.configured",
+        "Saved; this page never displays the key.",
+      )
+      : translate(
+        "configuration.manual_api_key.not_configured",
+        "No API key is saved.",
+      );
+  }
+
   function setConfigurationControlsEnabled(enabled) {
     const editable = Boolean(enabled);
-    elements.provider.disabled = !editable;
+    const manualMode = isManualProviderMode();
+    elements.providerField.hidden = manualMode;
+    elements.manualApiBaseField.hidden = !manualMode;
+    elements.manualApiKeyField.hidden = !manualMode;
+    elements.mode.disabled = !editable;
+    elements.provider.disabled = (
+      !editable || manualMode || !state.providerCatalogAvailable
+    );
+    elements.manualApiBase.disabled = !editable || !manualMode;
+    elements.manualApiKey.disabled = !editable || !manualMode;
     elements.model.disabled = !editable;
-    elements.save.disabled = !editable;
+    elements.clearManualApiKey.disabled = (
+      !editable || !manualMode || !state.manualApiKeyConfigured
+    );
+    elements.save.disabled = (
+      !editable || (!manualMode && state.providerCatalogLoading)
+    );
+    elements.modeHelp.textContent = manualMode
+      ? translate(
+        "configuration.mode.manual_help",
+        "Connect directly to a compatible service without relying on the chat-provider catalog.",
+      )
+      : translate(
+        "configuration.mode.astrbot_help",
+        "Use an AstrBot-configured chat provider; a blank provider follows the triggering session.",
+      );
+    elements.model.placeholder = manualMode
+      ? translate(
+        "configuration.model.manual_placeholder",
+        "A model ID is required in direct mode",
+      )
+      : translate(
+        "configuration.model.placeholder",
+        "Blank uses the AstrBot provider default model",
+      );
+    if (manualMode) {
+      elements.modelHelp.textContent = translate(
+        "configuration.model.manual_help",
+        "Direct mode requires a model ID and does not enumerate third-party models.",
+      );
+    }
+    updateManualApiKeyStatus();
   }
 
   function setRuntimeStatus(element, enabled, activeKey, inactiveKey) {
@@ -147,10 +216,70 @@
     });
   }
 
+  async function loadAstrBotProviderCatalog() {
+    const requestId = ++state.providerCatalogRequestId;
+    state.providerCatalogLoading = true;
+    state.providerCatalogAvailable = false;
+    setConfigurationControlsEnabled(state.configurationLoaded);
+    try {
+      const data = await apiGet("intelligent-console/config", {
+        include_provider_catalog: "1",
+      });
+      if (
+        requestId !== state.providerCatalogRequestId
+        || !state.configurationLoaded
+        || isManualProviderMode()
+      ) {
+        return;
+      }
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const selectedProvider = elements.provider.value || data.provider_id || "";
+      state.providerCatalogLoading = false;
+      state.providerCatalogAvailable = Boolean(data.provider_catalog_available);
+      populateProviders(
+        providers,
+        selectedProvider,
+        !selectedProvider || providers.some(({ id }) => id === selectedProvider),
+      );
+      setConfigurationControlsEnabled(true);
+      if (!state.providerCatalogAvailable) {
+        populateModels([]);
+        setFeedback(
+          elements.configFeedback,
+          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
+          "error",
+        );
+        return;
+      }
+      setFeedback(elements.configFeedback);
+      await loadModels();
+    } catch (error) {
+      if (
+        requestId !== state.providerCatalogRequestId
+        || !state.configurationLoaded
+        || isManualProviderMode()
+      ) {
+        return;
+      }
+      state.providerCatalogLoading = false;
+      state.providerCatalogAvailable = false;
+      populateModels([]);
+      setConfigurationControlsEnabled(true);
+      setFeedback(elements.configFeedback, formatError(error), "error");
+    }
+  }
+
   async function loadModels() {
-    const providerId = elements.provider.value;
     const requestId = ++state.modelRequestId;
     populateModels([]);
+    if (isManualProviderMode()) {
+      elements.modelHelp.textContent = translate(
+        "configuration.model.manual_help",
+        "Direct mode requires a model ID and does not enumerate third-party models.",
+      );
+      return;
+    }
+    const providerId = elements.provider.value;
     if (!providerId) {
       elements.modelHelp.textContent = translate(
         "configuration.provider.help",
@@ -202,15 +331,23 @@
   }
 
   async function loadConfiguration() {
-    const wasConfigurationLoaded = state.configurationLoaded;
-    const wasProviderCatalogAvailable = state.providerCatalogAvailable;
-    const restorePreviousConfigurationState = () => {
-      state.configurationLoaded = wasConfigurationLoaded;
-      state.providerCatalogAvailable = wasProviderCatalogAvailable;
-      setConfigurationControlsEnabled(
-        state.configurationLoaded && state.providerCatalogAvailable,
-      );
+    const previousState = {
+      configurationLoaded: state.configurationLoaded,
+      providerCatalogAvailable: state.providerCatalogAvailable,
+      providerMode: state.providerMode,
+      manualApiKeyConfigured: state.manualApiKeyConfigured,
     };
+    const restorePreviousConfigurationState = () => {
+      state.configurationLoaded = previousState.configurationLoaded;
+      state.providerCatalogAvailable = previousState.providerCatalogAvailable;
+      state.providerMode = previousState.providerMode;
+      state.manualApiKeyConfigured = previousState.manualApiKeyConfigured;
+      state.providerCatalogLoading = false;
+      elements.mode.value = state.providerMode;
+      setConfigurationControlsEnabled(state.configurationLoaded);
+    };
+    state.providerCatalogRequestId += 1;
+    state.providerCatalogLoading = false;
     state.configurationLoaded = false;
     setConfigurationControlsEnabled(false);
     setFeedback(
@@ -227,27 +364,36 @@
           "error",
         );
       }
-      const providerCatalogAvailable = Boolean(data.provider_catalog_available);
-      if (!providerCatalogAvailable) {
-        restorePreviousConfigurationState();
-        setFeedback(
-          elements.configFeedback,
-          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
-          "error",
-        );
-        return false;
-      }
-      state.providerCatalogAvailable = providerCatalogAvailable;
+      state.providerCatalogAvailable = Boolean(data.provider_catalog_available);
+      state.providerMode = data.provider_mode === "openai_compatible"
+        ? "openai_compatible"
+        : "astrbot";
+      state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
+      state.manualApiKeyClearRequested = false;
+      elements.mode.value = state.providerMode;
       populateProviders(
         Array.isArray(data.providers) ? data.providers : [],
         data.provider_id || "",
         Boolean(data.provider_exists),
       );
+      elements.manualApiBase.value = data.manual_api_base || "";
+      elements.manualApiKey.value = "";
       elements.model.value = data.model || "";
-      setFeedback(elements.configFeedback);
-      await loadModels();
       state.configurationLoaded = true;
       setConfigurationControlsEnabled(true);
+      if (isManualProviderMode()) {
+        populateModels([]);
+        setFeedback(elements.configFeedback);
+      } else if (!state.providerCatalogAvailable) {
+        setFeedback(
+          elements.configFeedback,
+          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
+          "error",
+        );
+      } else {
+        setFeedback(elements.configFeedback);
+        await loadModels();
+      }
       return true;
     } catch (error) {
       restorePreviousConfigurationState();
@@ -257,7 +403,7 @@
   }
 
   async function saveConfiguration() {
-    if (!state.configurationLoaded || !state.providerCatalogAvailable) {
+    if (!state.configurationLoaded) {
       setFeedback(
         elements.configFeedback,
         translate(
@@ -274,11 +420,30 @@
       translate("configuration.saving", "Saving…"),
     );
     try {
-      const data = await apiPost("intelligent-console/config", {
+      const payload = {
+        provider_mode: state.providerMode,
         provider_id: elements.provider.value.trim(),
+        manual_api_base: elements.manualApiBase.value.trim(),
         model: elements.model.value.trim(),
-      });
+      };
+      if (isManualProviderMode()) {
+        const manualApiKey = elements.manualApiKey.value.trim();
+        if (manualApiKey) {
+          payload.manual_api_key = manualApiKey;
+        } else if (state.manualApiKeyClearRequested) {
+          payload.manual_api_key = "";
+        }
+      }
+      const data = await apiPost("intelligent-console/config", payload);
+      state.providerMode = data.provider_mode === "openai_compatible"
+        ? "openai_compatible"
+        : "astrbot";
+      state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
+      state.manualApiKeyClearRequested = false;
+      elements.mode.value = state.providerMode;
       elements.provider.value = data.provider_id || "";
+      elements.manualApiBase.value = data.manual_api_base || "";
+      elements.manualApiKey.value = "";
       elements.model.value = data.model || "";
       if (!await loadConfiguration()) {
         return;
@@ -289,12 +454,29 @@
         "success",
       );
     } catch (error) {
+      state.manualApiKeyClearRequested = false;
       setFeedback(elements.configFeedback, formatError(error), "error");
     } finally {
-      setConfigurationControlsEnabled(
-        state.configurationLoaded && state.providerCatalogAvailable,
-      );
+      setConfigurationControlsEnabled(state.configurationLoaded);
     }
+  }
+
+  function clearManualApiKey() {
+    if (!state.configurationLoaded || !isManualProviderMode()) {
+      return;
+    }
+    const confirmed = typeof window.confirm !== "function" || window.confirm(
+      translate(
+        "configuration.manual_api_key.clear_confirm",
+        "Clear the saved API key? This saves immediately and cannot be undone.",
+      ),
+    );
+    if (!confirmed) {
+      return;
+    }
+    state.manualApiKeyClearRequested = true;
+    elements.manualApiKey.value = "";
+    void saveConfiguration();
   }
 
   async function runTest(kind) {
@@ -489,9 +671,27 @@
   }
 
   function bindControls() {
-    elements.provider.addEventListener("change", () => {
-      void loadModels();
+    elements.mode.addEventListener("change", () => {
+      state.providerMode = elements.mode.value === "openai_compatible"
+        ? "openai_compatible"
+        : "astrbot";
+      elements.mode.value = state.providerMode;
+      setConfigurationControlsEnabled(state.configurationLoaded);
+      if (isManualProviderMode()) {
+        state.providerCatalogRequestId += 1;
+        state.providerCatalogLoading = false;
+        setFeedback(elements.configFeedback);
+        void loadModels();
+      } else {
+        void loadAstrBotProviderCatalog();
+      }
     });
+    elements.provider.addEventListener("change", () => {
+      if (!isManualProviderMode()) {
+        void loadModels();
+      }
+    });
+    elements.clearManualApiKey.addEventListener("click", clearManualApiKey);
     elements.save.addEventListener("click", () => {
       void saveConfiguration();
     });

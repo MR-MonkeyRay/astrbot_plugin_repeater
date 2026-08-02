@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import copy
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import unittest
 import os
@@ -13,12 +14,13 @@ from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Callable
+from astrbot.dashboard.services.plugin_page_service import PluginPageService
 
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.api.message_components import Face, Image, Plain
 from astrbot.api.provider import LLMResponse
 
-from main import PERMISSION_ERROR, RepeaterPlugin
+from main import MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID, PERMISSION_ERROR, RepeaterPlugin
 from repeater_config import (
     DEFAULT_INTERRUPT_MUTE_TEXT,
     DEFAULT_INTERRUPT_TEXT,
@@ -92,7 +94,10 @@ class ConfigSchemaTest(unittest.TestCase):
                 "interrupt_mute_duration_min",
                 "interrupt_mute_duration_max",
                 "interrupt_mute_texts",
+                "intelligent_interrupt_provider_mode",
                 "intelligent_interrupt_provider_id",
+                "intelligent_interrupt_manual_api_base",
+                "intelligent_interrupt_manual_api_key",
                 "intelligent_interrupt_model",
                 "intelligent_interrupt_enabled",
                 "intelligent_interrupt_prompt",
@@ -118,12 +123,24 @@ class ConfigSchemaTest(unittest.TestCase):
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
+        self.assertEqual(schema["intelligent_interrupt_provider_mode"]["type"], "string")
+        self.assertEqual(schema["intelligent_interrupt_provider_mode"]["default"], "astrbot")
         self.assertEqual(schema["intelligent_interrupt_provider_id"]["type"], "string")
         self.assertEqual(schema["intelligent_interrupt_provider_id"]["default"], "")
         self.assertEqual(
             schema["intelligent_interrupt_provider_id"]["_special"],
             "select_provider",
         )
+        self.assertEqual(
+            schema["intelligent_interrupt_manual_api_base"]["type"],
+            "string",
+        )
+        self.assertEqual(schema["intelligent_interrupt_manual_api_base"]["default"], "")
+        self.assertEqual(
+            schema["intelligent_interrupt_manual_api_key"]["type"],
+            "string",
+        )
+        self.assertEqual(schema["intelligent_interrupt_manual_api_key"]["default"], "")
         self.assertEqual(schema["intelligent_interrupt_model"]["type"], "string")
         self.assertEqual(schema["intelligent_interrupt_model"]["default"], "")
 
@@ -263,24 +280,42 @@ class ConfigSchemaTest(unittest.TestCase):
                 "description": "禁言提示文案",
                 "hint": "智能禁言提示关闭、不可用或生成失败时随机发送；支持 {user}（被禁言用户）和 {time}（禁言秒数）占位符；留空使用默认文案。",
             },
+            "intelligent_interrupt_provider_mode": {
+                "type": "string",
+                "default": "astrbot",
+                "description": "智能文案供应商模式",
+                "hint": "决定智能打断和智能禁言提示的生成路由：选择 AstrBot 使用已配置的聊天供应商；选择 OpenAI-compatible 则直连手动配置的服务。",
+            },
             "intelligent_interrupt_provider_id": {
                 "type": "string",
                 "default": "",
                 "_special": "select_provider",
-                "description": "智能文案供应商 ID",
-                "hint": "可在“智能文案测试”页面从下拉列表选择已配置的聊天供应商；手动编辑配置文件时填写其 ID。用于智能打断和智能禁言提示；留空跟随触发会话，页面无法直接测试该模式。",
+                "description": "智能文案 AstrBot 供应商 ID",
+                "hint": "仅 AstrBot 模式使用。可在“智能文案测试”页面从下拉列表选择已配置的聊天供应商；手动编辑配置文件时填写其 ID。留空跟随触发会话，页面无法直接测试该模式。",
+            },
+            "intelligent_interrupt_manual_api_base": {
+                "type": "string",
+                "default": "",
+                "description": "手动 OpenAI-compatible API Base URL",
+                "hint": "仅 OpenAI-compatible 直连模式使用。填写兼容服务的根路径（可含服务所需版本路径），例如 http://localhost:8000/v1；不支持嵌入账号/密码、查询串或片段。",
+            },
+            "intelligent_interrupt_manual_api_key": {
+                "type": "string",
+                "default": "",
+                "description": "手动 OpenAI-compatible API Key",
+                "hint": "仅 OpenAI-compatible 直连模式使用。会随插件配置保存；“智能文案测试”页面不会回显已保存的 Key。",
             },
             "intelligent_interrupt_model": {
                 "type": "string",
                 "default": "",
                 "description": "智能文案模型",
-                "hint": "可在“智能文案测试”页面从所选供应商的候选列表选择，或手动输入未枚举的模型 ID；用于智能打断和智能禁言提示；留空使用最终供应商的默认模型。",
+                "hint": "用于智能打断和智能禁言提示；AstrBot 模式留空使用最终供应商的默认模型；OpenAI-compatible 直连模式必须填写，且不会自动枚举第三方模型。",
             },
             "intelligent_interrupt_enabled": {
                 "type": "bool",
                 "default": False,
                 "description": "智能打断复读",
-                "hint": "开启后，打断命中时使用 AstrBot 已配置的聊天供应商生成一条打断文案；默认关闭。",
+                "hint": "开启后，打断命中时按共享供应商模式生成一条打断文案；默认关闭。",
             },
             "intelligent_interrupt_prompt": {
                 "type": "text",
@@ -292,7 +327,7 @@ class ConfigSchemaTest(unittest.TestCase):
                 "type": "bool",
                 "default": False,
                 "description": "智能禁言提示",
-                "hint": "开启后，禁言成功时使用与智能打断相同的聊天供应商和模型生成一条提示文案；默认关闭。",
+                "hint": "开启后，禁言成功时按与智能打断共用的供应商模式和模型生成一条提示文案；默认关闭。",
             },
             "intelligent_interrupt_mute_prompt": {
                 "type": "text",
@@ -457,6 +492,71 @@ class ConfigModuleTest(unittest.TestCase):
                 "[repeater] intelligent_interrupt_mute_prompt 非法或为空，回退为默认智能禁言提示词",
             ],
         )
+
+    def test_manual_provider_settings_validate_without_key_echo(self) -> None:
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.warnings: list[str] = []
+
+            def warning(self, message: str) -> None:
+                self.warnings.append(message)
+
+        logger = RecordingLogger()
+        legacy_settings = build_settings({}, logger)
+        self.assertEqual(legacy_settings.intelligent_interrupt_provider_mode, "astrbot")
+        self.assertEqual(legacy_settings.intelligent_interrupt_manual_api_base, "")
+        self.assertEqual(legacy_settings.intelligent_interrupt_manual_api_key, "")
+
+        valid_settings = build_settings(
+            {
+                "intelligent_interrupt_provider_mode": "openai_compatible",
+                "intelligent_interrupt_manual_api_base": " http://localhost:8000/v1/ ",
+                "intelligent_interrupt_manual_api_key": " manual-api-key ",
+                "intelligent_interrupt_model": " manual-model ",
+            },
+            logger,
+        )
+        self.assertEqual(
+            valid_settings.intelligent_interrupt_provider_mode,
+            "openai_compatible",
+        )
+        self.assertEqual(
+            valid_settings.intelligent_interrupt_manual_api_base,
+            "http://localhost:8000/v1",
+        )
+        self.assertEqual(
+            valid_settings.intelligent_interrupt_manual_api_key,
+            "manual-api-key",
+        )
+        self.assertEqual(valid_settings.intelligent_interrupt_model, "manual-model")
+
+        key_sentinel = "manual-api-key-must-not-appear-in-logs-" * 20
+        invalid_settings = build_settings(
+            {
+                "intelligent_interrupt_provider_mode": "openai_compatible",
+                "intelligent_interrupt_manual_api_base": (
+                    "https://user:password@example.com/v1?trace=1"
+                ),
+                "intelligent_interrupt_manual_api_key": key_sentinel,
+                "intelligent_interrupt_model": [],
+            },
+            logger,
+        )
+        self.assertEqual(
+            invalid_settings.intelligent_interrupt_provider_mode,
+            "openai_compatible",
+        )
+        self.assertEqual(invalid_settings.intelligent_interrupt_manual_api_base, "")
+        self.assertEqual(invalid_settings.intelligent_interrupt_manual_api_key, "")
+        self.assertEqual(invalid_settings.intelligent_interrupt_model, "")
+        self.assertEqual(
+            build_settings(
+                {"intelligent_interrupt_provider_mode": "unsupported"},
+                logger,
+            ).intelligent_interrupt_provider_mode,
+            "astrbot",
+        )
+        self.assertNotIn(key_sentinel, "\n".join(logger.warnings))
 
 
 class FakeBot:
@@ -727,6 +827,9 @@ class SnapshotMemoryConfig(MemoryConfig):
                 {
                     "intelligent_interrupt_provider_id": "later-provider",
                     "intelligent_interrupt_model": "later-model",
+                    "intelligent_interrupt_provider_mode": "openai_compatible",
+                    "intelligent_interrupt_manual_api_base": "https://later.example/v1",
+                    "intelligent_interrupt_manual_api_key": "later-key",
                 },
             )
         return self.committed
@@ -817,6 +920,64 @@ class FakePageRequest:
     async def json(self, default=None):
         return self._body if self._body is not None else default
 
+
+class LocalOpenAICompatibleServer:
+    def __init__(
+        self,
+        *,
+        role: str = "assistant",
+        content: str = "manual OpenAI-compatible reply",
+    ) -> None:
+        self.requests: list[dict[str, object]] = []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(handler) -> None:
+                content_length = int(handler.headers.get("Content-Length", "0"))
+                request_body = json.loads(handler.rfile.read(content_length))
+                owner.requests.append(
+                    {
+                        "path": handler.path,
+                        "authorization": handler.headers.get("Authorization"),
+                        "body": request_body,
+                    },
+                )
+                response_body = json.dumps(
+                    {
+                        "id": "local-openai-compatible-test",
+                        "object": "chat.completion",
+                        "created": 0,
+                        "model": request_body.get("model", ""),
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": role, "content": content},
+                                "finish_reason": "stop",
+                            },
+                        ],
+                    },
+                ).encode("utf-8")
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(response_body)))
+                handler.end_headers()
+                handler.wfile.write(response_body)
+
+            def log_message(self, _format: str, *_args: object) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base_url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "LocalOpenAICompatibleServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._server.shutdown()
+        self._thread.join()
+        self._server.server_close()
 
 class FailingHistoryStore:
     async def initialize(self) -> int:
@@ -961,7 +1122,10 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
             interrupt_texts=("打断！",),
             interrupt_default_enabled=False,
             intelligent_interrupt_enabled=False,
+            intelligent_interrupt_provider_mode="astrbot",
             intelligent_interrupt_provider_id="",
+            intelligent_interrupt_manual_api_base="",
+            intelligent_interrupt_manual_api_key="",
             intelligent_interrupt_model="",
             intelligent_interrupt_prompt=DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
             interrupt_mute_enabled=False,
@@ -3244,6 +3408,46 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(history.end_display, "2026-03-08T08:00:00-04:00")
 
 
+class IntelligentConsolePageTest(unittest.TestCase):
+    def test_rendered_page_loads_bridge_before_application(self) -> None:
+        page_path = (
+            Path(__file__).resolve().parents[1]
+            / "pages"
+            / "intelligent-console"
+            / "index.html"
+        )
+        rendered = PluginPageService(None).rewrite_plugin_page_html(
+            page_path.read_text(encoding="utf-8"),
+            "astrbot_plugin_repeater",
+            "intelligent-console",
+            "index.html",
+            theme=None,
+            extra_query_params={"asset_token": "test-token"},
+        )
+
+        bridge_position = rendered.index(
+            "/api/plugin/page/bridge-sdk.js?asset_token=test-token",
+        )
+        application_position = rendered.index(
+            "intelligent-console/app.js?asset_token=test-token",
+        )
+        self.assertLess(bridge_position, application_position)
+
+    def test_failed_key_clear_allows_preserving_then_rotating_key(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        try:
+            result = subprocess.run(
+                ["node", "tests/intelligent_console_state_test.mjs"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except FileNotFoundError:
+            self.skipTest("Node.js is required to exercise the console state test")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
     async def test_console_routes_models_and_config_save(self) -> None:
         models = [f"model-{index:03d}" for index in range(501)]
@@ -3283,11 +3487,15 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                         (f"{prefix}/history", ("GET",)),
                     },
                 )
-                config_payload = response_payload(
-                    await plugin._web_get_intelligent_console_config(),
-                )
+                with patch("main.request", FakePageRequest()):
+                    config_payload = response_payload(
+                        await plugin._web_get_intelligent_console_config(),
+                    )
                 self.assertEqual(config_payload["status"], "ok")
                 self.assertTrue(config_payload["data"]["provider_exists"])
+                self.assertEqual(config_payload["data"]["provider_mode"], "astrbot")
+                self.assertEqual(config_payload["data"]["manual_api_base"], "")
+                self.assertFalse(config_payload["data"]["manual_api_key_configured"])
                 self.assertEqual(
                     [item["id"] for item in config_payload["data"]["providers"]],
                     ["provider-a", "provider-b"],
@@ -3317,7 +3525,13 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(save_payload["status"], "ok")
                 self.assertEqual(
                     save_payload["data"],
-                    {"provider_id": "provider-b", "model": "custom-model"},
+                    {
+                        "provider_mode": "astrbot",
+                        "provider_id": "provider-b",
+                        "manual_api_base": "",
+                        "model": "custom-model",
+                        "manual_api_key_configured": False,
+                    },
                 )
                 self.assertEqual(
                     config["intelligent_interrupt_provider_id"],
@@ -3332,6 +3546,527 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 await plugin.terminate()
             self.assertIsNotNone(cleanup_task)
             self.assertTrue(cleanup_task.cancelled())
+
+    async def test_direct_config_bypasses_catalog_and_hides_api_key(self) -> None:
+        class CatalogUnavailableContext(FakePageContext):
+            def __init__(self) -> None:
+                super().__init__()
+                self.catalog_calls = 0
+
+            def get_all_providers(self):
+                self.catalog_calls += 1
+                raise RuntimeError("provider catalog is unavailable")
+
+        original_key = "original-manual-provider-key"
+        rotated_key = "rotated-manual-provider-key"
+        astrbot_mode_key = "astrbot-mode-key-must-not-rotate"
+        context = CatalogUnavailableContext()
+        config = AsyncMemoryConfig(
+            {
+                "intelligent_interrupt_provider_mode": "openai_compatible",
+                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000/v1",
+                "intelligent_interrupt_manual_api_key": original_key,
+                "intelligent_interrupt_model": "manual-model",
+            },
+        )
+        plugin = MemoryRepeater({}, config, context=context)
+        await plugin.initialize()
+        try:
+            with patch(
+                "main.request",
+                FakePageRequest(
+                    body={
+                        "provider_mode": "openai_compatible",
+                        "provider_id": "saved-astrbot-provider",
+                        "manual_api_base": " http://127.0.0.1:9000/v1/ ",
+                        "manual_api_key": rotated_key,
+                        "model": "manual-model-v2",
+                    },
+                ),
+            ):
+                save_response = await plugin._web_save_intelligent_console_config()
+            save_payload = response_payload(save_response)
+
+            self.assertEqual(save_payload["status"], "ok")
+            self.assertEqual(context.catalog_calls, 0)
+            self.assertEqual(
+                save_payload["data"],
+                {
+                    "provider_mode": "openai_compatible",
+                    "provider_id": "saved-astrbot-provider",
+                    "manual_api_base": "http://127.0.0.1:9000/v1",
+                    "model": "manual-model-v2",
+                    "manual_api_key_configured": True,
+                },
+            )
+            self.assertNotIn(rotated_key, save_response.body.decode("utf-8"))
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                rotated_key,
+            )
+            with patch(
+                "main.request",
+                FakePageRequest(
+                    body={
+                        "provider_mode": "openai_compatible",
+                        "provider_id": "saved-astrbot-provider",
+                        "manual_api_base": "http://127.0.0.1:9000/v1",
+                        "model": "manual-model-v3",
+                    },
+                ),
+            ):
+                preserve_response = await plugin._web_save_intelligent_console_config()
+            preserve_payload = response_payload(preserve_response)
+            self.assertTrue(preserve_payload["data"]["manual_api_key_configured"])
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                rotated_key,
+            )
+            self.assertNotIn(rotated_key, preserve_response.body.decode("utf-8"))
+
+            with patch("main.request", FakePageRequest()):
+                config_response = await plugin._web_get_intelligent_console_config()
+            config_payload = response_payload(config_response)
+            self.assertEqual(config_payload["status"], "ok")
+            self.assertTrue(config_payload["data"]["provider_exists"])
+            self.assertTrue(config_payload["data"]["manual_api_key_configured"])
+            self.assertEqual(context.catalog_calls, 0)
+            self.assertNotIn(rotated_key, config_response.body.decode("utf-8"))
+            self.assertFalse(config_payload["data"]["provider_catalog_available"])
+            self.assertEqual(config_payload["data"]["providers"], [])
+            with patch(
+                "main.request",
+                FakePageRequest(query={"include_provider_catalog": "1"}),
+            ):
+                catalog_response = await plugin._web_get_intelligent_console_config()
+            catalog_payload = response_payload(catalog_response)
+            self.assertEqual(catalog_payload["status"], "ok")
+            self.assertFalse(catalog_payload["data"]["provider_catalog_available"])
+            self.assertEqual(context.catalog_calls, 1)
+            with patch(
+                "main.request",
+                FakePageRequest(
+                    body={
+                        "provider_mode": "astrbot",
+                        "provider_id": "",
+                        "manual_api_base": "http://127.0.0.1:9000/v1",
+                        "manual_api_key": astrbot_mode_key,
+                        "model": "manual-model-v3",
+                    },
+                ),
+            ):
+                astrbot_response = await plugin._web_save_intelligent_console_config()
+            astrbot_payload = response_payload(astrbot_response)
+            self.assertEqual(astrbot_payload["status"], "ok")
+            self.assertEqual(astrbot_payload["data"]["provider_mode"], "astrbot")
+            self.assertTrue(
+                astrbot_payload["data"]["manual_api_key_configured"],
+            )
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                rotated_key,
+            )
+            self.assertNotIn(
+                astrbot_mode_key,
+                astrbot_response.body.decode("utf-8"),
+            )
+            self.assertEqual(context.catalog_calls, 1)
+            with patch(
+                "main.request",
+                FakePageRequest(
+                    body={
+                        "provider_mode": "openai_compatible",
+                        "provider_id": "saved-astrbot-provider",
+                        "manual_api_base": "http://127.0.0.1:9000/v1",
+                        "manual_api_key": "",
+                        "model": "manual-model-v3",
+                    },
+                ),
+            ):
+                clear_response = await plugin._web_save_intelligent_console_config()
+            clear_payload = response_payload(clear_response)
+            self.assertFalse(clear_payload["data"]["manual_api_key_configured"])
+            self.assertEqual(config["intelligent_interrupt_manual_api_key"], "")
+            self.assertEqual(context.catalog_calls, 1)
+            self.assertNotIn(original_key, clear_response.body.decode("utf-8"))
+            self.assertNotIn(rotated_key, clear_response.body.decode("utf-8"))
+        finally:
+            await plugin.terminate()
+
+    async def test_manual_openai_compatible_runtime_and_page_use_direct_client(
+        self,
+    ) -> None:
+        api_key = "manual-api-key-for-local-http-test"
+        context = FakePageContext()
+        with LocalOpenAICompatibleServer() as server:
+            with tempfile.TemporaryDirectory() as directory:
+                plugin = MemoryRepeater(
+                    {},
+                    {
+                        "repeat_threshold": 2,
+                        "interrupt_default_enabled": True,
+                        "interrupt_probability": 1.0,
+                        "interrupt_texts": ["static interrupt"],
+                        "intelligent_interrupt_enabled": True,
+                        "intelligent_interrupt_provider_mode": "openai_compatible",
+                        "intelligent_interrupt_manual_api_base": server.base_url,
+                        "intelligent_interrupt_manual_api_key": api_key,
+                        "intelligent_interrupt_model": "manual-model",
+                    },
+                    context=context,
+                )
+                store = IntelligentHistoryStore(
+                    Path(directory) / "intelligent_history.sqlite3",
+                )
+                plugin.history_store = store
+                await plugin.initialize()
+                try:
+                    first = FakeEvent("manual-runtime", "A", "测试复读内容", "1")
+                    second = FakeEvent("manual-runtime", "B", "测试复读内容", "2")
+                    await plugin.on_group_message(first)
+                    await plugin.on_group_message(second)
+                    repeat_payload = response_payload(
+                        await plugin._web_test_intelligent_repeat(),
+                    )
+                    mute_payload = response_payload(
+                        await plugin._web_test_intelligent_mute(),
+                    )
+                    await plugin._drain_history_write_tasks()
+
+                    self.assertEqual(second.sent, ["manual OpenAI-compatible reply"])
+                    self.assertEqual(repeat_payload["status"], "ok")
+                    self.assertEqual(mute_payload["status"], "ok")
+                    self.assertEqual(
+                        repeat_payload["data"]["provider_id"],
+                        MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID,
+                    )
+                    self.assertEqual(context.provider_calls, [])
+                    self.assertEqual(context.llm_calls, [])
+                    self.assertEqual(len(server.requests), 3)
+                    for request_data in server.requests:
+                        self.assertEqual(request_data["path"], "/chat/completions")
+                        self.assertEqual(
+                            request_data["authorization"],
+                            f"Bearer {api_key}",
+                        )
+                        request_body = request_data["body"]
+                        self.assertEqual(request_body["model"], "manual-model")
+                        self.assertEqual(
+                            [message["role"] for message in request_body["messages"]],
+                            ["system", "user"],
+                        )
+                    self.assertEqual(
+                        {
+                            request_data["body"]["messages"][1]["content"]
+                            for request_data in server.requests
+                        },
+                        {
+                            "被复读的内容：测试复读内容",
+                            "被复读的内容：这是智能打断测试使用的固定示例消息。",
+                            "被禁言用户：测试用户\n禁言时长：60秒",
+                        },
+                    )
+                    history = await store.query(window="day", page_size=50)
+                    self.assertEqual(history.summary["total"], 3)
+                    self.assertTrue(
+                        all(
+                            record.provider_id
+                            == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
+                            for record in history.records
+                        ),
+                    )
+                    self.assertNotIn(
+                        api_key,
+                        json.dumps(history.to_dict(), ensure_ascii=False),
+                    )
+                finally:
+                    await plugin.terminate()
+
+    async def test_manual_response_key_echo_is_rejected_without_exposure(
+        self,
+    ) -> None:
+        class CapturingLogger:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def warning(self, message: str) -> None:
+                self.messages.append(message)
+
+            def info(self, message: str) -> None:
+                self.messages.append(message)
+
+        api_key = "manual-api-key-that-must-not-be-echoed"
+        context = FakePageContext()
+        captured_logger = CapturingLogger()
+        with LocalOpenAICompatibleServer(content=f"debug echo: {api_key}") as server:
+            with tempfile.TemporaryDirectory() as directory:
+                plugin = MemoryRepeater(
+                    {},
+                    {
+                        "repeat_threshold": 2,
+                        "interrupt_default_enabled": True,
+                        "interrupt_probability": 1.0,
+                        "interrupt_texts": ["static interrupt"],
+                        "intelligent_interrupt_enabled": True,
+                        "intelligent_interrupt_provider_mode": "openai_compatible",
+                        "intelligent_interrupt_manual_api_base": server.base_url,
+                        "intelligent_interrupt_manual_api_key": api_key,
+                        "intelligent_interrupt_model": "manual-model",
+                    },
+                    context=context,
+                )
+                store = IntelligentHistoryStore(
+                    Path(directory) / "intelligent_history.sqlite3",
+                )
+                plugin.history_store = store
+                await plugin.initialize()
+                try:
+                    first = FakeEvent("manual-echo", "A", "测试复读内容", "1")
+                    second = FakeEvent("manual-echo", "B", "测试复读内容", "2")
+                    with patch("main.logger", captured_logger):
+                        await plugin.on_group_message(first)
+                        await plugin.on_group_message(second)
+                        page_response = await plugin._web_test_intelligent_repeat()
+                    await plugin._drain_history_write_tasks()
+
+                    page_payload = response_payload(page_response)
+                    self.assertEqual(second.sent, ["static interrupt"])
+                    self.assertEqual(page_response.status_code, 502)
+                    self.assertEqual(
+                        page_payload["data"]["code"],
+                        "invalid_response",
+                    )
+                    self.assertNotIn(api_key, page_response.body.decode("utf-8"))
+                    self.assertEqual(context.provider_calls, [])
+                    self.assertEqual(context.llm_calls, [])
+                    self.assertEqual(len(server.requests), 2)
+                    history = await store.query(window="day", page_size=50)
+                    self.assertEqual(history.summary["fallback"], 1)
+                    self.assertEqual(history.summary["failed"], 1)
+                    self.assertNotIn(
+                        api_key,
+                        json.dumps(history.to_dict(), ensure_ascii=False),
+                    )
+                    self.assertNotIn(api_key, "\n".join(captured_logger.messages))
+                finally:
+                    await plugin.terminate()
+
+    async def test_manual_direct_incomplete_configuration_falls_back_without_request(
+        self,
+    ) -> None:
+        context = FakePageContext()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = MemoryRepeater(
+                {},
+                {
+                    "repeat_threshold": 2,
+                    "interrupt_default_enabled": True,
+                    "interrupt_probability": 1.0,
+                    "interrupt_texts": ["static interrupt"],
+                    "intelligent_interrupt_enabled": True,
+                    "intelligent_interrupt_provider_mode": "openai_compatible",
+                    "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
+                    "intelligent_interrupt_model": "manual-model",
+                },
+                context=context,
+            )
+            store = IntelligentHistoryStore(
+                Path(directory) / "intelligent_history.sqlite3",
+            )
+            plugin.history_store = store
+            await plugin.initialize()
+            try:
+                with patch(
+                    "openai.AsyncOpenAI",
+                    side_effect=AssertionError("manual client must not be created"),
+                ):
+                    first = FakeEvent("manual-fallback", "A", "缺少 Key", "1")
+                    second = FakeEvent("manual-fallback", "B", "缺少 Key", "2")
+                    await plugin.on_group_message(first)
+                    await plugin.on_group_message(second)
+                    page_response = await plugin._web_test_intelligent_repeat()
+                await plugin._drain_history_write_tasks()
+
+                page_payload = response_payload(page_response)
+                self.assertEqual(second.sent, ["static interrupt"])
+                self.assertEqual(page_response.status_code, 409)
+                self.assertEqual(
+                    page_payload["data"]["code"],
+                    "provider_resolution_failed",
+                )
+                self.assertEqual(context.provider_calls, [])
+                self.assertEqual(context.llm_calls, [])
+                history = await store.query(window="day", page_size=50)
+                self.assertEqual(history.summary["fallback"], 1)
+                self.assertEqual(history.summary["failed"], 1)
+                self.assertTrue(
+                    all(
+                        record.provider_id
+                        == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
+                        for record in history.records
+                    ),
+                )
+            finally:
+                await plugin.terminate()
+
+    async def test_manual_client_closes_and_maps_failures(self) -> None:
+        class FakeAsyncOpenAI:
+            instances: list["FakeAsyncOpenAI"] = []
+            response: object = SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            role="assistant",
+                            content="manual completion",
+                        ),
+                    ),
+                ],
+            )
+            request_error: BaseException | None = None
+            close_error: BaseException | None = None
+
+            def __init__(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.requests: list[dict[str, object]] = []
+                self.closed = False
+                self.chat = SimpleNamespace(completions=self)
+                self.__class__.instances.append(self)
+
+            async def create(self, **kwargs: object) -> object:
+                self.requests.append(kwargs)
+                if self.__class__.request_error is not None:
+                    raise self.__class__.request_error
+                return self.__class__.response
+
+            async def close(self) -> None:
+                self.closed = True
+                if self.__class__.close_error is not None:
+                    raise self.__class__.close_error
+
+        context = FakeContext()
+        plugin = MemoryRepeater(
+            {},
+            {
+                "intelligent_interrupt_provider_mode": "openai_compatible",
+                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
+                "intelligent_interrupt_manual_api_key": "manual-api-key",
+                "intelligent_interrupt_model": "manual-model",
+            },
+            context=context,
+        )
+        settings = plugin.state_service.settings
+
+        async def run_generation():
+            return await plugin._run_intelligent_generation(
+                prompt="manual user prompt",
+                system_prompt="manual system prompt",
+                settings=settings,
+                unified_msg_origin="onebot:group:manual",
+                feature_name="manual client test",
+            )
+
+        def configure_client(
+            *,
+            response: object | None = None,
+            request_error: BaseException | None = None,
+            close_error: BaseException | None = None,
+        ) -> None:
+            FakeAsyncOpenAI.instances = []
+            FakeAsyncOpenAI.response = (
+                response
+                if response is not None
+                else SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                role="assistant",
+                                content="manual completion",
+                            ),
+                        ),
+                    ],
+                )
+            )
+            FakeAsyncOpenAI.request_error = request_error
+            FakeAsyncOpenAI.close_error = close_error
+
+        with patch("openai.AsyncOpenAI", FakeAsyncOpenAI):
+            configure_client(close_error=RuntimeError("close failed"))
+            success = await run_generation()
+            self.assertEqual(success.result_code, "success")
+            self.assertEqual(success.completion, "manual completion")
+            self.assertTrue(FakeAsyncOpenAI.instances[-1].closed)
+
+            configure_client(request_error=RuntimeError("transport failed"))
+            request_failure = await run_generation()
+            self.assertEqual(request_failure.result_code, "request_failed")
+            self.assertTrue(FakeAsyncOpenAI.instances[-1].closed)
+
+            configure_client(
+                response=SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(role="user", content="wrong role"),
+                        ),
+                    ],
+                ),
+            )
+            invalid_response = await run_generation()
+            self.assertEqual(invalid_response.result_code, "invalid_response")
+            self.assertTrue(FakeAsyncOpenAI.instances[-1].closed)
+
+            configure_client(request_error=asyncio.CancelledError())
+            with self.assertRaises(asyncio.CancelledError):
+                await run_generation()
+            self.assertTrue(FakeAsyncOpenAI.instances[-1].closed)
+
+        self.assertEqual(context.provider_calls, [])
+        self.assertEqual(context.llm_calls, [])
+
+    async def test_manual_page_save_error_does_not_log_or_echo_api_key(self) -> None:
+        class CapturingLogger:
+            def __init__(self) -> None:
+                self.messages: list[str] = []
+
+            def warning(self, message: str) -> None:
+                self.messages.append(message)
+
+        original_key = "existing-manual-api-key"
+        replacement_key = "replacement-manual-api-key"
+        config = MemoryConfig(
+            {
+                "intelligent_interrupt_provider_mode": "openai_compatible",
+                "intelligent_interrupt_manual_api_base": "http://127.0.0.1:8000",
+                "intelligent_interrupt_manual_api_key": original_key,
+                "intelligent_interrupt_model": "manual-model",
+            },
+        )
+        config.fail_next_save = True
+        plugin = MemoryRepeater({}, config, context=FakePageContext())
+        captured_logger = CapturingLogger()
+        with (
+            patch("main.logger", captured_logger),
+            patch(
+                "main.request",
+                FakePageRequest(
+                    body={
+                        "provider_mode": "openai_compatible",
+                        "provider_id": "",
+                        "manual_api_base": "http://127.0.0.1:8000",
+                        "manual_api_key": replacement_key,
+                        "model": "manual-model",
+                    },
+                ),
+            ),
+        ):
+            response = await plugin._web_save_intelligent_console_config()
+
+        self.assertEqual(response.status_code, 500)
+        response_body = response.body.decode("utf-8")
+        self.assertNotIn(original_key, response_body)
+        self.assertNotIn(replacement_key, response_body)
+        self.assertNotIn(original_key, "\n".join(captured_logger.messages))
+        self.assertNotIn(replacement_key, "\n".join(captured_logger.messages))
+        self.assertEqual(config["intelligent_interrupt_manual_api_key"], original_key)
 
     async def test_config_snapshot_conflict_does_not_swap_runtime_settings(self) -> None:
         config = AsyncMemoryConfig(
@@ -3359,7 +4094,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         config = SnapshotMemoryConfig(
             {
                 "intelligent_interrupt_provider_id": "old-provider",
+                "intelligent_interrupt_provider_mode": "astrbot",
                 "intelligent_interrupt_model": "old-model",
+                "intelligent_interrupt_manual_api_base": "",
+                "intelligent_interrupt_manual_api_key": "old-key",
             },
             mutate_after_write=True,
         )
@@ -3369,6 +4107,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             committed = await plugin._save_intelligent_console_config(
                 provider_id="saved-provider",
                 model="saved-model",
+                provider_mode="openai_compatible",
+                manual_api_base="https://saved.example/v1",
+                manual_api_key="saved-key",
             )
 
             self.assertTrue(committed)
@@ -3377,8 +4118,28 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 "saved-provider",
             )
             self.assertEqual(
+                config.written_snapshots[-1]["intelligent_interrupt_provider_mode"],
+                "openai_compatible",
+            )
+            self.assertEqual(
+                config.written_snapshots[-1]["intelligent_interrupt_manual_api_base"],
+                "https://saved.example/v1",
+            )
+            self.assertEqual(
+                config.written_snapshots[-1]["intelligent_interrupt_manual_api_key"],
+                "saved-key",
+            )
+            self.assertEqual(
                 config["intelligent_interrupt_provider_id"],
                 "later-provider",
+            )
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_base"],
+                "https://later.example/v1",
+            )
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                "later-key",
             )
             self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_provider_id,
@@ -3387,6 +4148,18 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_model,
                 "saved-model",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_provider_mode,
+                "openai_compatible",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_base,
+                "https://saved.example/v1",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_key,
+                "saved-key",
             )
         finally:
             await plugin.terminate()
@@ -3422,7 +4195,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         config = SnapshotMemoryConfig(
             {
                 "intelligent_interrupt_provider_id": "old-provider",
+                "intelligent_interrupt_provider_mode": "astrbot",
                 "intelligent_interrupt_model": "old-model",
+                "intelligent_interrupt_manual_api_base": "",
+                "intelligent_interrupt_manual_api_key": "old-key",
             },
             committed=False,
             mutate_after_write=True,
@@ -3433,6 +4209,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             committed = await plugin._save_intelligent_console_config(
                 provider_id="saved-provider",
                 model="saved-model",
+                provider_mode="openai_compatible",
+                manual_api_base="https://saved.example/v1",
+                manual_api_key="saved-key",
             )
 
             self.assertFalse(committed)
@@ -3442,12 +4221,33 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(config["intelligent_interrupt_model"], "old-model")
             self.assertEqual(
+                config["intelligent_interrupt_provider_mode"],
+                "astrbot",
+            )
+            self.assertEqual(config["intelligent_interrupt_manual_api_base"], "")
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                "old-key",
+            )
+            self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_provider_id,
                 "old-provider",
             )
             self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_model,
                 "old-model",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_provider_mode,
+                "astrbot",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_base,
+                "",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_key,
+                "old-key",
             )
         finally:
             await plugin.terminate()
@@ -3458,7 +4258,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         config = BlockingAsyncMemoryConfig(
             {
                 "intelligent_interrupt_provider_id": "old-provider",
+                "intelligent_interrupt_provider_mode": "astrbot",
                 "intelligent_interrupt_model": "old-model",
+                "intelligent_interrupt_manual_api_base": "",
+                "intelligent_interrupt_manual_api_key": "old-key",
             },
         )
         plugin = MemoryRepeater({}, config, context=FakePageContext())
@@ -3467,6 +4270,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             plugin._save_intelligent_console_config(
                 provider_id="saved-provider",
                 model="saved-model",
+                provider_mode="openai_compatible",
+                manual_api_base="https://saved.example/v1",
+                manual_api_key="saved-key",
             ),
         )
         try:
@@ -3484,12 +4290,36 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(config["intelligent_interrupt_model"], "saved-model")
             self.assertEqual(
+                config["intelligent_interrupt_provider_mode"],
+                "openai_compatible",
+            )
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_base"],
+                "https://saved.example/v1",
+            )
+            self.assertEqual(
+                config["intelligent_interrupt_manual_api_key"],
+                "saved-key",
+            )
+            self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_provider_id,
                 "saved-provider",
             )
             self.assertEqual(
                 plugin.state_service.settings.intelligent_interrupt_model,
                 "saved-model",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_provider_mode,
+                "openai_compatible",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_base,
+                "https://saved.example/v1",
+            )
+            self.assertEqual(
+                plugin.state_service.settings.intelligent_interrupt_manual_api_key,
+                "saved-key",
             )
         finally:
             config.release_save.set()
