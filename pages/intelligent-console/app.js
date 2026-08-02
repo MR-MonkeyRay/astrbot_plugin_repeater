@@ -17,13 +17,16 @@
       kind: "all",
       page: 1,
       totalPages: 1,
+      expandedRow: null,
     },
     modelRequestId: 0,
     historyRequestId: 0,
   };
 
   const elements = {
-    mode: document.querySelector("#provider-mode"),
+    viewTabs: document.querySelectorAll(".view-tab"),
+    viewPanels: document.querySelectorAll(".workspace-view"),
+    modeTabs: document.querySelectorAll(".route-tab"),
     modeHelp: document.querySelector("#provider-mode-help"),
     providerField: document.querySelector("#astrbot-provider-field"),
     provider: document.querySelector("#provider-select"),
@@ -100,6 +103,12 @@
     document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
       node.placeholder = translate(node.dataset.i18nPlaceholder, node.placeholder);
     });
+    document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => {
+      node.setAttribute(
+        "aria-label",
+        translate(node.dataset.i18nAriaLabel, node.getAttribute("aria-label") || ""),
+      );
+    });
   }
 
   async function apiGet(endpoint, params) {
@@ -110,8 +119,53 @@
     return bridge.apiPost(endpoint, body);
   }
 
+  function normalizeProviderMode(value) {
+    return value === "openai_compatible" ? "openai_compatible" : "astrbot";
+  }
+
   function isManualProviderMode() {
     return state.providerMode === "openai_compatible";
+  }
+
+  function syncProviderModeTabs() {
+    elements.modeTabs.forEach((button) => {
+      const selected = button.dataset.providerMode === state.providerMode;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-checked", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+  }
+
+  function viewFromLocation() {
+    const view = window.location?.hash?.replace(/^#/, "");
+    return ["configuration", "tests", "history"].includes(view)
+      ? view
+      : "configuration";
+  }
+
+  function selectView(view, { updateLocation = true } = {}) {
+    const selectedView = ["configuration", "tests", "history"].includes(view)
+      ? view
+      : "configuration";
+    state.activeView = selectedView;
+    elements.viewTabs.forEach((button) => {
+      const selected = button.dataset.view === selectedView;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    elements.viewPanels.forEach((panel) => {
+      const selected = panel.id === `${selectedView}-view`;
+      panel.classList.toggle("is-active", selected);
+      panel.hidden = !selected;
+    });
+    if (updateLocation && window.history?.replaceState && window.location) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname || ""}${window.location.search || ""}#${selectedView}`,
+      );
+    }
   }
 
   function updateManualApiKeyStatus() {
@@ -132,7 +186,10 @@
     elements.providerField.hidden = manualMode;
     elements.manualApiBaseField.hidden = !manualMode;
     elements.manualApiKeyField.hidden = !manualMode;
-    elements.mode.disabled = !editable;
+    elements.modeTabs.forEach((button) => {
+      button.disabled = !editable;
+    });
+    syncProviderModeTabs();
     elements.provider.disabled = (
       !editable || manualMode || !state.providerCatalogAvailable
     );
@@ -170,6 +227,27 @@
       );
     }
     updateManualApiKeyStatus();
+  }
+
+  function selectProviderMode(mode) {
+    const providerMode = normalizeProviderMode(mode);
+    if (providerMode === state.providerMode) {
+      syncProviderModeTabs();
+      return;
+    }
+    state.providerMode = providerMode;
+    setConfigurationControlsEnabled(state.configurationLoaded);
+    if (!state.configurationLoaded) {
+      return;
+    }
+    if (isManualProviderMode()) {
+      state.providerCatalogRequestId += 1;
+      state.providerCatalogLoading = false;
+      setFeedback(elements.configFeedback);
+      void loadModels();
+    } else {
+      void loadAstrBotProviderCatalog();
+    }
   }
 
   function setRuntimeStatus(element, enabled, activeKey, inactiveKey) {
@@ -343,7 +421,6 @@
       state.providerMode = previousState.providerMode;
       state.manualApiKeyConfigured = previousState.manualApiKeyConfigured;
       state.providerCatalogLoading = false;
-      elements.mode.value = state.providerMode;
       setConfigurationControlsEnabled(state.configurationLoaded);
     };
     state.providerCatalogRequestId += 1;
@@ -365,12 +442,9 @@
         );
       }
       state.providerCatalogAvailable = Boolean(data.provider_catalog_available);
-      state.providerMode = data.provider_mode === "openai_compatible"
-        ? "openai_compatible"
-        : "astrbot";
+      state.providerMode = normalizeProviderMode(data.provider_mode);
       state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
       state.manualApiKeyClearRequested = false;
-      elements.mode.value = state.providerMode;
       populateProviders(
         Array.isArray(data.providers) ? data.providers : [],
         data.provider_id || "",
@@ -440,7 +514,7 @@
         : "astrbot";
       state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
       state.manualApiKeyClearRequested = false;
-      elements.mode.value = state.providerMode;
+      syncProviderModeTabs();
       elements.provider.value = data.provider_id || "";
       elements.manualApiBase.value = data.manual_api_base || "";
       elements.manualApiKey.value = "";
@@ -563,11 +637,66 @@
     return cell;
   }
 
+  function historyDetailValue(value) {
+    if (value === null || value === undefined || value === "") {
+      return translate("history.not_available", "—");
+    }
+    return String(value);
+  }
+
+  function appendHistoryDetail(
+    details,
+    labelKey,
+    fallbackLabel,
+    value,
+    wide = false,
+  ) {
+    const detail = document.createElement("div");
+    detail.className = `history-detail${wide ? " history-detail-wide" : ""}`;
+    const label = document.createElement("dt");
+    label.textContent = translate(labelKey, fallbackLabel);
+    const content = document.createElement("dd");
+    content.textContent = historyDetailValue(value);
+    detail.append(label, content);
+    details.append(detail);
+  }
+
+  function setHistoryRowExpanded(row, detailRow, expanded) {
+    row.classList.toggle("is-expanded", expanded);
+    row.setAttribute("aria-expanded", String(expanded));
+    detailRow.hidden = !expanded;
+  }
+
+  function toggleHistoryRow(row, detailRow) {
+    const expandedRow = state.history.expandedRow;
+    const isCurrentRow = expandedRow?.row === row;
+    if (expandedRow) {
+      setHistoryRowExpanded(expandedRow.row, expandedRow.detailRow, false);
+    }
+    state.history.expandedRow = null;
+    if (!isCurrentRow) {
+      setHistoryRowExpanded(row, detailRow, true);
+      state.history.expandedRow = { row, detailRow };
+    }
+  }
+
   function renderHistoryRows(records) {
+    state.history.expandedRow = null;
     elements.historyRows.replaceChildren();
     elements.historyEmpty.hidden = records.length !== 0;
-    records.forEach((record) => {
+    records.forEach((record, index) => {
+      const recordId = record.id ?? `page-${index}`;
+      const detailId = `history-detail-${recordId}`;
       const row = document.createElement("tr");
+      row.className = "history-record-row";
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-controls", detailId);
+      row.setAttribute("aria-expanded", "false");
+      row.setAttribute(
+        "aria-label",
+        translate("history.detail.toggle", "Toggle record details"),
+      );
       appendCell(row, formatTimestamp(record.occurred_at_ms), "cell-meta");
       appendCell(
         row,
@@ -596,7 +725,56 @@
       );
       appendCell(row, contextLabel(record), "cell-meta");
       appendCell(row, `${record.latency_ms ?? 0} ms`, "cell-meta");
-      elements.historyRows.append(row);
+
+      const detailRow = document.createElement("tr");
+      detailRow.className = "history-detail-row";
+      detailRow.id = detailId;
+      detailRow.hidden = true;
+      const detailCell = document.createElement("td");
+      detailCell.className = "history-detail-cell";
+      detailCell.colSpan = 7;
+      const details = document.createElement("dl");
+      details.className = "history-details";
+      appendHistoryDetail(
+        details,
+        "history.detail.message_text",
+        "Repeated content",
+        record.message_text,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.prompt",
+        "LLM request",
+        record.prompt,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.completion",
+        "LLM reply",
+        record.completion,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.repeat_user_count",
+        "Repeat users",
+        record.repeat_user_count,
+      );
+      detailCell.append(details);
+      detailRow.append(detailCell);
+
+      const toggle = () => toggleHistoryRow(row, detailRow);
+      row.addEventListener("click", toggle);
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        event.preventDefault();
+        toggle();
+      });
+      elements.historyRows.append(row, detailRow);
     });
   }
 
@@ -665,27 +843,56 @@
     document.querySelectorAll(".range-tab").forEach((button) => {
       const selected = button.dataset.window === window;
       button.classList.toggle("is-active", selected);
-      button.setAttribute("aria-selected", String(selected));
+      button.setAttribute("aria-pressed", String(selected));
     });
     void loadHistory();
   }
 
-  function bindControls() {
-    elements.mode.addEventListener("change", () => {
-      state.providerMode = elements.mode.value === "openai_compatible"
-        ? "openai_compatible"
-        : "astrbot";
-      elements.mode.value = state.providerMode;
-      setConfigurationControlsEnabled(state.configurationLoaded);
-      if (isManualProviderMode()) {
-        state.providerCatalogRequestId += 1;
-        state.providerCatalogLoading = false;
-        setFeedback(elements.configFeedback);
-        void loadModels();
-      } else {
-        void loadAstrBotProviderCatalog();
-      }
+  function bindViewTabs() {
+    const tabs = Array.from(elements.viewTabs);
+    tabs.forEach((button, index) => {
+      button.addEventListener("click", () => selectView(button.dataset.view));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        nextTab.focus?.();
+        selectView(nextTab.dataset.view);
+      });
     });
+  }
+
+  function bindModeTabs() {
+    const tabs = Array.from(elements.modeTabs);
+    tabs.forEach((button, index) => {
+      button.addEventListener("click", () => selectProviderMode(button.dataset.providerMode));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (index + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        nextTab.focus?.();
+        selectProviderMode(nextTab.dataset.providerMode);
+      });
+    });
+  }
+
+  function bindControls() {
+    bindViewTabs();
+    bindModeTabs();
     elements.provider.addEventListener("change", () => {
       if (!isManualProviderMode()) {
         void loadModels();
@@ -725,8 +932,12 @@
 
   async function start() {
     applyTranslations();
+    selectView(viewFromLocation(), { updateLocation: false });
     setConfigurationControlsEnabled(false);
     bindControls();
+    window.addEventListener?.("hashchange", () => {
+      selectView(viewFromLocation(), { updateLocation: false });
+    });
     if (!bridge) {
       setFeedback(
         elements.configFeedback,

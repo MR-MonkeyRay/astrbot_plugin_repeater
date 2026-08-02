@@ -1,4 +1,4 @@
-"""Privacy-preserving persistence for intelligent-generation telemetry."""
+"""Short-lived persistence for intelligent-generation history."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ class HistoryStorageError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class IntelligentActionRecord:
-    """One content-free intelligent generation attempt."""
+    """One intelligent generation attempt and its displayable details."""
 
     occurred_at_ms: int
     kind: HistoryKind
@@ -39,10 +39,14 @@ class IntelligentActionRecord:
     mute_duration_seconds: int | None
     latency_ms: int
     failure_code: str | None = None
+    message_text: str | None = None
+    prompt: str | None = None
+    completion: str | None = None
+    repeat_user_count: int | None = None
     id: int | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-serializable record without hidden fields."""
+        """Return a JSON-serializable history record."""
         return asdict(self)
 
 
@@ -85,7 +89,7 @@ class HistoryPage:
 
 
 class IntelligentHistoryStore:
-    """Serialize short-lived SQLite operations for intelligent action telemetry."""
+    """Serialize short-lived SQLite operations for intelligent action history."""
 
     _VALID_KINDS = frozenset(("repeat", "mute"))
     _VALID_SOURCES = frozenset(("runtime", "manual_test"))
@@ -114,7 +118,7 @@ class IntelligentHistoryStore:
             return deleted
 
     async def append(self, record: IntelligentActionRecord) -> IntelligentActionRecord:
-        """Persist one validated metadata-only record."""
+        """Persist one validated history record."""
         self._validate_record(record)
         async with self._lock:
             self._require_initialized()
@@ -130,6 +134,10 @@ class IntelligentHistoryStore:
             mute_duration_seconds=record.mute_duration_seconds,
             latency_ms=record.latency_ms,
             failure_code=record.failure_code,
+            message_text=record.message_text,
+            prompt=record.prompt,
+            completion=record.completion,
+            repeat_user_count=record.repeat_user_count,
             id=record_id,
         )
 
@@ -279,10 +287,31 @@ class IntelligentHistoryStore:
                     group_id TEXT,
                     mute_duration_seconds INTEGER,
                     latency_ms INTEGER NOT NULL,
-                    failure_code TEXT
+                    failure_code TEXT,
+                    message_text TEXT,
+                    prompt TEXT,
+                    completion TEXT,
+                    repeat_user_count INTEGER CHECK (repeat_user_count >= 0)
                 )
                 """
             )
+            existing_columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(intelligent_action_history)"
+                )
+            }
+            for column, definition in (
+                ("message_text", "TEXT"),
+                ("prompt", "TEXT"),
+                ("completion", "TEXT"),
+                ("repeat_user_count", "INTEGER"),
+            ):
+                if column not in existing_columns:
+                    connection.execute(
+                        "ALTER TABLE intelligent_action_history "
+                        f"ADD COLUMN {column} {definition}"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_intelligent_action_history_occurred
@@ -323,8 +352,12 @@ class IntelligentHistoryStore:
                     group_id,
                     mute_duration_seconds,
                     latency_ms,
-                    failure_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    failure_code,
+                    message_text,
+                    prompt,
+                    completion,
+                    repeat_user_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.occurred_at_ms,
@@ -337,6 +370,10 @@ class IntelligentHistoryStore:
                     record.mute_duration_seconds,
                     record.latency_ms,
                     record.failure_code,
+                    record.message_text,
+                    record.prompt,
+                    record.completion,
+                    record.repeat_user_count,
                 ),
             )
             connection.commit()
@@ -396,7 +433,11 @@ class IntelligentHistoryStore:
                     group_id,
                     mute_duration_seconds,
                     latency_ms,
-                    failure_code
+                    failure_code,
+                    message_text,
+                    prompt,
+                    completion,
+                    repeat_user_count
                 FROM intelligent_action_history
                 WHERE {where_clause}
                 ORDER BY occurred_at_ms DESC, id DESC
@@ -427,6 +468,10 @@ class IntelligentHistoryStore:
                 mute_duration_seconds=row[8],
                 latency_ms=int(row[9]),
                 failure_code=row[10],
+                message_text=row[11],
+                prompt=row[12],
+                completion=row[13],
+                repeat_user_count=row[14],
             )
             for row in rows
         ]
@@ -463,7 +508,9 @@ class IntelligentHistoryStore:
             record.occurred_at_ms, bool
         ):
             raise ValueError("occurred_at_ms must be an integer")
-        if not isinstance(record.latency_ms, int) or isinstance(record.latency_ms, bool):
+        if not isinstance(record.latency_ms, int) or isinstance(
+            record.latency_ms, bool
+        ):
             raise ValueError("latency_ms must be an integer")
         if record.latency_ms < 0:
             raise ValueError("latency_ms must not be negative")
@@ -483,6 +530,21 @@ class IntelligentHistoryStore:
                 raise ValueError("mute_duration_seconds must not be negative")
         if record.failure_code is not None and not isinstance(record.failure_code, str):
             raise ValueError("failure_code must be a string or None")
+        for field_name, value in (
+            ("message_text", record.message_text),
+            ("prompt", record.prompt),
+            ("completion", record.completion),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{field_name} must be a string or None")
+        if record.repeat_user_count is not None:
+            if not isinstance(record.repeat_user_count, int) or isinstance(
+                record.repeat_user_count,
+                bool,
+            ):
+                raise ValueError("repeat_user_count must be an integer or None")
+            if record.repeat_user_count < 0:
+                raise ValueError("repeat_user_count must not be negative")
 
     def _validate_query(
         self,

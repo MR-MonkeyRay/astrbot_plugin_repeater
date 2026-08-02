@@ -54,6 +54,12 @@ class Element {
   setAttribute(name, value) {
     this.attributes.set(name, value);
   }
+
+  getAttribute(name) {
+    return this.attributes.get(name) || null;
+  }
+
+  focus() {}
 }
 
 const elements = new Map();
@@ -67,8 +73,32 @@ const elementFor = (selector) => {
 const selectorLists = new Map([
   ["[data-i18n]", []],
   ["[data-i18n-placeholder]", []],
+  ["[data-i18n-aria-label]", []],
   [".range-tab", []],
+  [".route-tab", []],
+  [".view-tab", []],
+  [".workspace-view", []],
 ]);
+
+const astrbotRouteTab = new Element();
+astrbotRouteTab.dataset.providerMode = "astrbot";
+const manualRouteTab = new Element();
+manualRouteTab.dataset.providerMode = "openai_compatible";
+const configurationTab = new Element();
+configurationTab.dataset.view = "configuration";
+const testsTab = new Element();
+testsTab.dataset.view = "tests";
+const historyTab = new Element();
+historyTab.dataset.view = "history";
+const configurationView = new Element();
+configurationView.id = "configuration-view";
+const testsView = new Element();
+testsView.id = "tests-view";
+const historyView = new Element();
+historyView.id = "history-view";
+selectorLists.set(".route-tab", [astrbotRouteTab, manualRouteTab]);
+selectorLists.set(".view-tab", [configurationTab, testsTab, historyTab]);
+selectorLists.set(".workspace-view", [configurationView, testsView, historyView]);
 
 globalThis.document = {
   createElement: () => new Element(),
@@ -105,7 +135,38 @@ globalThis.window = {
         return {
           pagination: { page: 1, total_pages: 1 },
           range: null,
-          records: [],
+          records: [
+            {
+              id: 1,
+              occurred_at_ms: 0,
+              source: "runtime",
+              kind: "repeat",
+              outcome: "success",
+              provider_id: "provider-a",
+              model: "model-a",
+              group_id: "group-a",
+              latency_ms: 7,
+              message_text: "first repeated message",
+              prompt: "first prompt",
+              completion: "first reply",
+              repeat_user_count: 2,
+            },
+            {
+              id: 2,
+              occurred_at_ms: 1,
+              source: "runtime",
+              kind: "repeat",
+              outcome: "success",
+              provider_id: "provider-b",
+              model: "model-b",
+              group_id: "group-b",
+              latency_ms: 8,
+              message_text: "second repeated message",
+              prompt: "second prompt",
+              completion: "second reply",
+              repeat_user_count: 3,
+            },
+          ],
           summary: {},
         };
       }
@@ -137,6 +198,42 @@ const source = readFileSync("pages/intelligent-console/app.js", "utf8");
 eval(source);
 await settle();
 
+assert.equal(configurationView.hidden, false);
+assert.equal(testsView.hidden, true);
+assert.equal(manualRouteTab.classList.contains("is-active"), true);
+assert.equal(manualRouteTab.attributes.get("aria-checked"), "true");
+
+testsTab.click();
+assert.equal(testsView.hidden, false);
+assert.equal(configurationView.hidden, true);
+assert.equal(testsTab.attributes.get("aria-selected"), "true");
+
+configurationTab.click();
+configurationTab.listeners.get("keydown")({
+  key: "ArrowRight",
+  preventDefault() {},
+});
+assert.equal(testsView.hidden, false);
+assert.equal(testsTab.tabIndex, 0);
+
+testsTab.listeners.get("keydown")({
+  key: "ArrowLeft",
+  preventDefault() {},
+});
+assert.equal(configurationView.hidden, false);
+assert.equal(configurationTab.tabIndex, 0);
+astrbotRouteTab.click();
+await settle();
+assert.equal(astrbotRouteTab.classList.contains("is-active"), true);
+assert.equal(elementFor("#astrbot-provider-field").hidden, false);
+assert.equal(elementFor("#manual-api-base-field").hidden, true);
+
+manualRouteTab.click();
+await settle();
+assert.equal(manualRouteTab.classList.contains("is-active"), true);
+assert.equal(elementFor("#astrbot-provider-field").hidden, true);
+assert.equal(elementFor("#manual-api-base-field").hidden, false);
+
 elementFor("#clear-manual-api-key").click();
 await settle();
 assert.equal(configPosts.length, 1);
@@ -153,3 +250,21 @@ elementFor("#save-config").click();
 await settle();
 assert.equal(configPosts.length, 3);
 assert.equal(configPosts[2].manual_api_key, "replacement-key");
+
+const [firstRow, firstDetailRow, secondRow, secondDetailRow] = elementFor(
+  "#history-rows",
+).children;
+assert.equal(firstDetailRow.hidden, true);
+assert.equal(secondDetailRow.hidden, true);
+assert.equal(firstDetailRow.children[0].children[0].children[0].children[1].textContent, "first repeated message");
+
+firstRow.click();
+assert.equal(firstRow.attributes.get("aria-expanded"), "true");
+assert.equal(firstDetailRow.hidden, false);
+assert.equal(secondDetailRow.hidden, true);
+
+secondRow.click();
+assert.equal(firstRow.attributes.get("aria-expanded"), "false");
+assert.equal(firstDetailRow.hidden, true);
+assert.equal(secondRow.attributes.get("aria-expanded"), "true");
+assert.equal(secondDetailRow.hidden, false);

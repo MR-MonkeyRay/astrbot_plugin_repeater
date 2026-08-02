@@ -290,6 +290,7 @@ class RepeaterPlugin(Star):
         if write_tasks:
             await asyncio.gather(*write_tasks, return_exceptions=True)
         self._history_write_tasks.difference_update(write_tasks)
+
     async def _chat_provider_catalog(
         self,
     ) -> tuple[list[dict[str, str]], dict[str, Any], bool]:
@@ -335,9 +336,7 @@ class RepeaterPlugin(Star):
                     "id": normalized_id,
                     "label": normalized_id,
                     "current_model": (
-                        current_model.strip()
-                        if isinstance(current_model, str)
-                        else ""
+                        current_model.strip() if isinstance(current_model, str) else ""
                     ),
                 },
             )
@@ -351,9 +350,7 @@ class RepeaterPlugin(Star):
             raise ValueError(f"{field_name} 必须是字符串")
         normalized = value.strip()
         if len(normalized) > MAX_CONFIG_TEXT_LENGTH:
-            raise ValueError(
-                f"{field_name} 不能超过 {MAX_CONFIG_TEXT_LENGTH} 个字符"
-            )
+            raise ValueError(f"{field_name} 不能超过 {MAX_CONFIG_TEXT_LENGTH} 个字符")
         return normalized
 
     @staticmethod
@@ -385,7 +382,11 @@ class RepeaterPlugin(Star):
             or request.query.get("include_provider_catalog") == "1"
         )
         if load_provider_catalog:
-            options, provider_by_id, catalog_available = await self._chat_provider_catalog()
+            (
+                options,
+                provider_by_id,
+                catalog_available,
+            ) = await self._chat_provider_catalog()
         else:
             options, provider_by_id, catalog_available = [], {}, False
         return json_response(
@@ -555,14 +556,15 @@ class RepeaterPlugin(Star):
                 and hasattr(state_lock, "__enter__")
                 and hasattr(state_lock, "__exit__")
             ):
-                (committed, snapshot), was_cancelled = (
-                    await self._await_settled_config_save(
-                        asyncio.to_thread(
-                            self._save_astrbot_config_snapshot,
-                            self.config,
-                            updates,
-                        ),
-                    )
+                (
+                    (committed, snapshot),
+                    was_cancelled,
+                ) = await self._await_settled_config_save(
+                    asyncio.to_thread(
+                        self._save_astrbot_config_snapshot,
+                        self.config,
+                        updates,
+                    ),
                 )
                 if committed:
                     settings = build_settings(snapshot, logger)
@@ -576,10 +578,8 @@ class RepeaterPlugin(Star):
             save_config_async = getattr(self.config, "save_config_async", None)
             try:
                 if callable(save_config_async):
-                    save_result, was_cancelled = (
-                        await self._await_settled_config_save(
-                            save_config_async(updates),
-                        )
+                    save_result, was_cancelled = await self._await_settled_config_save(
+                        save_config_async(updates),
                     )
                     if save_result is False:
                         self.config.clear()
@@ -646,8 +646,7 @@ class RepeaterPlugin(Star):
                 )
             manual_api_key: str | None = None
             if (
-                provider_mode
-                == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+                provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
                 and "manual_api_key" in body
             ):
                 manual_api_key = normalize_intelligent_interrupt_manual_api_key(
@@ -661,10 +660,7 @@ class RepeaterPlugin(Star):
                     )
         except ValueError as exc:
             return error_response(str(exc))
-        if (
-            provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT
-            and provider_id
-        ):
+        if provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT and provider_id:
             _, provider_by_id, catalog_available = await self._chat_provider_catalog()
             if not catalog_available:
                 return error_response("聊天供应商列表暂不可用。", status_code=503)
@@ -682,12 +678,13 @@ class RepeaterPlugin(Star):
             raise
         except Exception as exc:
             logger.warning(
-                "[repeater] 保存智能文案 Page 配置失败（"
-                f"{type(exc).__name__}）",
+                f"[repeater] 保存智能文案 Page 配置失败（{type(exc).__name__}）",
             )
             return error_response("保存智能文案配置失败。", status_code=500)
         if not committed:
-            return error_response("配置正在被其他操作更新，请刷新后重试。", status_code=409)
+            return error_response(
+                "配置正在被其他操作更新，请刷新后重试。", status_code=409
+            )
         saved_settings = self.state_service.settings
         return json_response(
             {
@@ -709,6 +706,8 @@ class RepeaterPlugin(Star):
         *,
         kind: Literal["repeat", "mute"],
         result: IntelligentGenerationResult,
+        message_text: str | None = None,
+        prompt: str | None = None,
     ) -> None:
         """Synchronously retain a Page test so an immediate history refresh sees it."""
         outcome: Literal["success", "fallback", "failed"] = (
@@ -720,6 +719,8 @@ class RepeaterPlugin(Star):
                 kind=kind,
                 source="manual_test",
                 outcome=outcome,
+                message_text=message_text,
+                prompt=prompt,
             ),
         )
 
@@ -736,6 +737,16 @@ class RepeaterPlugin(Star):
         provider_mode = settings.intelligent_interrupt_provider_mode
         provider_id = settings.intelligent_interrupt_provider_id
         model = settings.intelligent_interrupt_model
+        if kind == "repeat":
+            message_text = "这是智能打断测试使用的固定示例消息。"
+            prompt = f"被复读的内容：{message_text}"
+            system_prompt = settings.intelligent_interrupt_prompt
+            feature_name = "智能打断测试"
+        else:
+            message_text = None
+            prompt = "被禁言用户：测试用户\n禁言时长：60秒"
+            system_prompt = settings.intelligent_interrupt_mute_prompt
+            feature_name = "智能禁言提示测试"
         if provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT:
             if not provider_id:
                 result = IntelligentGenerationResult(
@@ -745,7 +756,12 @@ class RepeaterPlugin(Star):
                     latency_ms=0,
                     result_code="provider_resolution_failed",
                 )
-                await self._record_manual_generation(kind=kind, result=result)
+                await self._record_manual_generation(
+                    kind=kind,
+                    result=result,
+                    message_text=message_text,
+                    prompt=prompt,
+                )
                 return error_response(
                     "留空供应商会跟随触发会话；页面测试需要先保存一个明确的聊天供应商。",
                     status_code=409,
@@ -760,20 +776,17 @@ class RepeaterPlugin(Star):
                     latency_ms=0,
                     result_code="provider_resolution_failed",
                 )
-                await self._record_manual_generation(kind=kind, result=result)
+                await self._record_manual_generation(
+                    kind=kind,
+                    result=result,
+                    message_text=message_text,
+                    prompt=prompt,
+                )
                 return error_response(
                     "保存的聊天供应商当前不可用，请重新选择后保存。",
                     status_code=409 if catalog_available else 503,
                     data={"code": result.result_code},
                 )
-        if kind == "repeat":
-            prompt = "被复读的内容：这是智能打断测试使用的固定示例消息。"
-            system_prompt = settings.intelligent_interrupt_prompt
-            feature_name = "智能打断测试"
-        else:
-            prompt = "被禁言用户：测试用户\n禁言时长：60秒"
-            system_prompt = settings.intelligent_interrupt_mute_prompt
-            feature_name = "智能禁言提示测试"
         result = await self._run_intelligent_generation(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -781,11 +794,15 @@ class RepeaterPlugin(Star):
             unified_msg_origin=None,
             feature_name=feature_name,
         )
-        await self._record_manual_generation(kind=kind, result=result)
+        await self._record_manual_generation(
+            kind=kind,
+            result=result,
+            message_text=message_text,
+            prompt=prompt,
+        )
         if result.result_code != "success":
             if (
-                provider_mode
-                == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+                provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
                 and result.result_code == "provider_resolution_failed"
             ):
                 return error_response(
@@ -992,16 +1009,14 @@ class RepeaterPlugin(Star):
 
         response_text = attempt.response_text
         settings = self.state_service.settings
-        if (
-            attempt.interrupted
-            and settings.intelligent_interrupt_enabled
-        ):
+        if attempt.interrupted and settings.intelligent_interrupt_enabled:
             try:
                 response_text = await self._generate_intelligent_interrupt(
                     event,
                     message,
                     attempt.response_text,
                     settings=settings,
+                    repeat_user_count=attempt.repeat_user_count,
                 )
             except asyncio.CancelledError:
                 try:
@@ -1051,7 +1066,7 @@ class RepeaterPlugin(Star):
             f"[repeater] {group_key} 触发{action}: {response_text[:20]}",
         )
         if attempt.interrupted:
-            await self._handle_interrupt_mute(event, group_key, attempt)
+            await self._handle_interrupt_mute(event, group_key, attempt, message)
 
     async def _request_manual_openai_compatible_completion(
         self,
@@ -1116,7 +1131,6 @@ class RepeaterPlugin(Star):
                     f"{type(exc).__name__})",
                 )
 
-
     async def _run_intelligent_generation(
         self,
         *,
@@ -1144,12 +1158,14 @@ class RepeaterPlugin(Star):
                     result_code="provider_resolution_failed",
                 )
             try:
-                completion_text = await self._request_manual_openai_compatible_completion(
-                    api_base=manual_api_base,
-                    api_key=manual_api_key,
-                    model=requested_model,
-                    system_prompt=system_prompt,
-                    prompt=prompt,
+                completion_text = (
+                    await self._request_manual_openai_compatible_completion(
+                        api_base=manual_api_base,
+                        api_key=manual_api_key,
+                        model=requested_model,
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                    )
                 )
             except asyncio.CancelledError:
                 raise
@@ -1278,8 +1294,11 @@ class RepeaterPlugin(Star):
         outcome: Literal["success", "fallback", "failed"],
         group_id: str | None = None,
         mute_duration_seconds: int | None = None,
+        message_text: str | None = None,
+        prompt: str | None = None,
+        repeat_user_count: int | None = None,
     ) -> IntelligentActionRecord:
-        """Build the content-free telemetry row for a completed generation."""
+        """Build one history record for a completed generation."""
         return IntelligentActionRecord(
             occurred_at_ms=time.time_ns() // 1_000_000,
             kind=kind,
@@ -1293,6 +1312,10 @@ class RepeaterPlugin(Star):
             failure_code=(
                 None if result.result_code == "success" else result.result_code
             ),
+            message_text=message_text,
+            prompt=prompt,
+            completion=result.completion,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _generate_intelligent_text(
@@ -1306,8 +1329,10 @@ class RepeaterPlugin(Star):
         feature_name: str,
         history_kind: Literal["repeat", "mute"],
         mute_duration_seconds: int | None = None,
+        message_text: str | None = None,
+        repeat_user_count: int | None = None,
     ) -> str:
-        """Generate runtime text and asynchronously retain its safe outcome."""
+        """Generate runtime text and asynchronously retain its call details."""
         result = await self._run_intelligent_generation(
             prompt=prompt,
             system_prompt=system_prompt,
@@ -1326,6 +1351,9 @@ class RepeaterPlugin(Star):
                 outcome=outcome,
                 group_id=self._group_key(event),
                 mute_duration_seconds=mute_duration_seconds,
+                message_text=message_text,
+                prompt=prompt,
+                repeat_user_count=repeat_user_count,
             ),
         )
         return result.completion if result.completion is not None else fallback_text
@@ -1335,18 +1363,22 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         message: RepeatableMessage,
         fallback_text: str,
+        repeat_user_count: int,
         *,
         settings: RepeaterSettings,
     ) -> str:
         """Generate intelligent interrupt text or retain the existing fallback."""
+        message_text = message.text or message.summary
         return await self._generate_intelligent_text(
             event,
             settings=settings,
-            prompt=f"被复读的内容：{message.text or message.summary}",
+            prompt=f"被复读的内容：{message_text}",
             system_prompt=settings.intelligent_interrupt_prompt,
             fallback_text=fallback_text,
             feature_name="智能打断",
             history_kind="repeat",
+            message_text=message_text,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _generate_intelligent_interrupt_mute_notice(
@@ -1354,6 +1386,8 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         *,
         sender_name: str,
+        message_text: str,
+        repeat_user_count: int,
         duration: int,
         fallback_text: str,
         settings: RepeaterSettings,
@@ -1368,6 +1402,8 @@ class RepeaterPlugin(Star):
             feature_name="智能禁言提示",
             history_kind="mute",
             mute_duration_seconds=duration,
+            message_text=message_text,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _handle_interrupt_mute(
@@ -1375,6 +1411,7 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         group_key: str,
         attempt: RepeatAttempt,
+        message: RepeatableMessage,
     ) -> None:
         """处理打断复读后的禁言逻辑。
 
@@ -1430,6 +1467,8 @@ class RepeaterPlugin(Star):
                 sender_name=sender_name,
                 duration=duration,
                 fallback_text=fallback_text,
+                message_text=message.text or message.summary,
+                repeat_user_count=attempt.repeat_user_count,
                 settings=settings,
             )
         try:

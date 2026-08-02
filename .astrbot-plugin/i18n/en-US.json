@@ -5,6 +5,12 @@
       "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
       "heading": "Intelligent Copy Test",
       "intro": "Save the shared route, provider, and model; run non-destructive copy tests; and inspect seven days of records.",
+      "navigation": {
+        "label": "Console navigation",
+        "configuration": "Route setup",
+        "tests": "Copy tests",
+        "history": "Activity"
+      },
       "configuration": {
         "kicker": "Shared configuration",
         "title": "Provider route and model",
@@ -12,8 +18,10 @@
           "label": "Generation route",
           "astrbot": "AstrBot chat provider",
           "openai_compatible": "OpenAI-compatible direct",
+          "astrbot_description": "Use an AstrBot-configured chat provider",
           "astrbot_help": "Use an AstrBot-configured chat provider; a blank provider follows the triggering session.",
-          "manual_help": "Connect directly to a compatible service without relying on the AstrBot chat-provider catalog."
+          "manual_help": "Connect directly to a compatible service without relying on the AstrBot chat-provider catalog.",
+          "manual_description": "Connect to a custom OpenAI-compatible service"
         },
         "provider": {
           "label": "Chat provider",
@@ -48,17 +56,17 @@
         "saving": "Saving…"
       },
       "runtime": {
-        "repeat_on": "Intelligent repeat: active",
-        "repeat_off": "Intelligent repeat: off",
+        "repeat_on": "Intelligent interrupt: active",
+        "repeat_off": "Intelligent interrupt: off",
         "mute_on": "Intelligent mute notice: active",
         "mute_off": "Intelligent mute notice: off"
       },
       "tests": {
         "repeat": {
           "kicker": "Fixed simulated input",
-          "title": "Intelligent repeat copy test",
+          "title": "Intelligent interrupt test",
           "description": "Generates one test copy with the saved interrupt prompt. No group message is sent.",
-          "action": "Test intelligent repeat"
+          "action": "Test intelligent interrupt"
         },
         "mute": {
           "kicker": "Fixed simulated input",
@@ -71,9 +79,10 @@
         "failed": "Test failed: {message}"
       },
       "history": {
-        "kicker": "Operational metadata only",
-        "title": "Intelligent copy records",
+        "kicker": "Select a record to view call details",
+        "title": "LLM call records",
         "windows": {
+          "label": "Record time range",
           "day": "Today",
           "24h": "24H",
           "2d": "2 days",
@@ -83,12 +92,12 @@
         "filter": {
           "label": "Type",
           "all": "All",
-          "repeat": "Intelligent repeat",
+          "repeat": "Intelligent interrupt",
           "mute": "Intelligent mute"
         },
         "summary": {
           "total": "Total",
-          "repeat": "Repeat",
+          "repeat": "Interrupt",
           "mute": "Mute",
           "success": "Success",
           "fallback": "Fallback",
@@ -108,7 +117,7 @@
           "manual_test": "Manual test"
         },
         "action": {
-          "repeat": "Intelligent repeat",
+          "repeat": "Intelligent interrupt",
           "mute": "Intelligent mute"
         },
         "outcome": {
@@ -121,11 +130,19 @@
         "unavailable": "Intelligent record storage is unavailable.",
         "empty": "There are no records in this time range.",
         "pagination": {
+          "label": "Record pagination",
           "previous": "Previous",
           "next": "Next",
           "page": "Page {page} / {total}"
         },
-        "privacy": "Records never retain group text, generated copy, sender identifiers, exception details, or credentials. Data older than seven days is cleaned in the background.",
+        "detail": {
+          "toggle": "Expand or collapse record details",
+          "message_text": "Repeated content",
+          "prompt": "LLM request",
+          "completion": "LLM reply",
+          "repeat_user_count": "Repeat users"
+        },
+        "privacy": "Records retain repeated content, LLM requests, and replies for review here. Data older than seven days is cleaned in the background.",
         "group": "Group {group}",
         "duration": "Muted {duration} s",
         "not_available": "—"

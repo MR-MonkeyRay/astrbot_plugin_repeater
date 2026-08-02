@@ -145,7 +145,7 @@
   "intelligent_interrupt_enabled": {
     "type": "bool",
     "default": false,
-    "description": "智能打断复读",
+    "description": "智能打断",
     "hint": "开启后，打断命中时按共享供应商模式生成一条打断文案；默认关闭。"
   },
   "intelligent_interrupt_prompt": {

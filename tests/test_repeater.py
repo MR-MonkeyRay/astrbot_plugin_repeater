@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import unittest
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -123,8 +124,12 @@ class ConfigSchemaTest(unittest.TestCase):
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(schema["intelligent_interrupt_provider_mode"]["type"], "string")
-        self.assertEqual(schema["intelligent_interrupt_provider_mode"]["default"], "astrbot")
+        self.assertEqual(
+            schema["intelligent_interrupt_provider_mode"]["type"], "string"
+        )
+        self.assertEqual(
+            schema["intelligent_interrupt_provider_mode"]["default"], "astrbot"
+        )
         self.assertEqual(schema["intelligent_interrupt_provider_id"]["type"], "string")
         self.assertEqual(schema["intelligent_interrupt_provider_id"]["default"], "")
         self.assertEqual(
@@ -316,7 +321,7 @@ class ConfigSchemaTest(unittest.TestCase):
             "intelligent_interrupt_enabled": {
                 "type": "bool",
                 "default": False,
-                "description": "智能打断复读",
+                "description": "智能打断",
                 "hint": "开启后，打断命中时按共享供应商模式生成一条打断文案；默认关闭。",
             },
             "intelligent_interrupt_prompt": {
@@ -981,6 +986,7 @@ class LocalOpenAICompatibleServer:
         self._thread.join()
         self._server.server_close()
 
+
 class FailingHistoryStore:
     async def initialize(self) -> int:
         return 0
@@ -994,6 +1000,7 @@ class FailingHistoryStore:
 
 def response_payload(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
+
 
 class MemoryRepeater(RepeaterPlugin):
     def __init__(
@@ -1206,7 +1213,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             plugin.state_service.settings.intelligent_interrupt_prompt,
             DEFAULT_INTELLIGENT_INTERRUPT_PROMPT,
         )
-        self.assertFalse(plugin.state_service.settings.intelligent_interrupt_mute_enabled)
+        self.assertFalse(
+            plugin.state_service.settings.intelligent_interrupt_mute_enabled
+        )
         self.assertEqual(
             plugin.state_service.settings.intelligent_interrupt_mute_prompt,
             DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
@@ -3240,7 +3249,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
 
 class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
-    async def test_windows_filter_pagination_and_privacy_contract(self) -> None:
+    async def test_windows_filter_pagination_and_detail_contract(self) -> None:
         local_timezone = timezone(timedelta(hours=8))
         now = datetime(2026, 8, 1, 0, 30, tzinfo=timezone.utc)
         now_ms = int(now.timestamp() * 1000)
@@ -3277,6 +3286,12 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
                     mute_duration_seconds=60 if kind == "mute" else None,
                     latency_ms=7,
                     failure_code=("request_failed" if outcome == "failed" else None),
+                    message_text=f"message {occurred_at_ms}",
+                    prompt=f"prompt {occurred_at_ms}",
+                    completion=(
+                        f"completion {occurred_at_ms}" if outcome == "success" else None
+                    ),
+                    repeat_user_count=3 if kind == "repeat" else None,
                 )
 
             cutoff = now_ms - RETENTION_MS
@@ -3314,9 +3329,101 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
             retained_times = {item.occurred_at_ms for item in seven_days.records}
             self.assertIn(cutoff, retained_times)
             self.assertNotIn(cutoff - 1, retained_times)
-            self.assertNotIn("text", seven_days.records[0].to_dict())
-            self.assertNotIn("completion", seven_days.records[0].to_dict())
-            self.assertNotIn("sender_id", seven_days.records[0].to_dict())
+            details = seven_days.records[0].to_dict()
+            self.assertEqual(details["message_text"], f"message {now_ms - 1_000}")
+            self.assertEqual(details["prompt"], f"prompt {now_ms - 1_000}")
+            self.assertEqual(
+                details["completion"],
+                f"completion {now_ms - 1_000}",
+            )
+            self.assertEqual(details["repeat_user_count"], 3)
+
+    async def test_initialization_migrates_legacy_history_schema(self) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "intelligent_history.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE intelligent_action_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        occurred_at_ms INTEGER NOT NULL,
+                        kind TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        outcome TEXT NOT NULL,
+                        provider_id TEXT,
+                        model TEXT NOT NULL,
+                        group_id TEXT,
+                        mute_duration_seconds INTEGER,
+                        latency_ms INTEGER NOT NULL,
+                        failure_code TEXT
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    INSERT INTO intelligent_action_history (
+                        occurred_at_ms, kind, source, outcome, provider_id, model,
+                        group_id, mute_duration_seconds, latency_ms, failure_code
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        now_ms - 1,
+                        "repeat",
+                        "runtime",
+                        "success",
+                        "provider-a",
+                        "model-a",
+                        "group-a",
+                        None,
+                        1,
+                        None,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = IntelligentHistoryStore(path, clock=lambda: now)
+            await store.initialize()
+            await store.append(
+                IntelligentActionRecord(
+                    occurred_at_ms=now_ms,
+                    kind="repeat",
+                    source="runtime",
+                    outcome="success",
+                    provider_id="provider-a",
+                    model="model-a",
+                    group_id="group-a",
+                    mute_duration_seconds=None,
+                    latency_ms=1,
+                    message_text="repeated message",
+                    prompt="prompt",
+                    completion="reply",
+                    repeat_user_count=2,
+                )
+            )
+            connection = sqlite3.connect(path)
+            try:
+                columns = {
+                    row[1]
+                    for row in connection.execute(
+                        "PRAGMA table_info(intelligent_action_history)"
+                    )
+                }
+            finally:
+                connection.close()
+            self.assertTrue(
+                {"message_text", "prompt", "completion", "repeat_user_count"} <= columns
+            )
+            history = await store.query(window="day", page_size=50)
+            self.assertEqual(history.records[0].message_text, "repeated message")
+            self.assertEqual(history.records[0].prompt, "prompt")
+            self.assertEqual(history.records[0].completion, "reply")
+            self.assertEqual(history.records[0].repeat_user_count, 2)
+            self.assertIsNone(history.records[1].message_text)
 
     async def test_initialization_purges_only_strictly_expired_records(self) -> None:
         now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
@@ -3343,7 +3450,9 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
             reloaded_store = IntelligentHistoryStore(path, clock=lambda: now)
             self.assertEqual(await reloaded_store.initialize(), 1)
             records = await reloaded_store.query(window="7d", page_size=50)
-            self.assertEqual([item.occurred_at_ms for item in records.records], [cutoff])
+            self.assertEqual(
+                [item.occurred_at_ms for item in records.records], [cutoff]
+            )
 
     async def test_cancelled_append_waits_for_its_sqlite_worker(self) -> None:
         now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
@@ -3772,11 +3881,25 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(history.summary["total"], 3)
                     self.assertTrue(
                         all(
-                            record.provider_id
-                            == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
+                            record.provider_id == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
                             for record in history.records
                         ),
                     )
+                    runtime_record = next(
+                        record
+                        for record in history.records
+                        if record.source == "runtime"
+                    )
+                    self.assertEqual(runtime_record.message_text, "测试复读内容")
+                    self.assertEqual(
+                        runtime_record.prompt,
+                        "被复读的内容：测试复读内容",
+                    )
+                    self.assertEqual(
+                        runtime_record.completion,
+                        "manual OpenAI-compatible reply",
+                    )
+                    self.assertEqual(runtime_record.repeat_user_count, 2)
                     self.assertNotIn(
                         api_key,
                         json.dumps(history.to_dict(), ensure_ascii=False),
@@ -3903,8 +4026,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(history.summary["failed"], 1)
                 self.assertTrue(
                     all(
-                        record.provider_id
-                        == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
+                        record.provider_id == MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID
                         for record in history.records
                     ),
                 )
@@ -4070,7 +4192,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(replacement_key, "\n".join(captured_logger.messages))
         self.assertEqual(config["intelligent_interrupt_manual_api_key"], original_key)
 
-    async def test_config_snapshot_conflict_does_not_swap_runtime_settings(self) -> None:
+    async def test_config_snapshot_conflict_does_not_swap_runtime_settings(
+        self,
+    ) -> None:
         config = AsyncMemoryConfig(
             {"intelligent_interrupt_provider_id": "provider-a"},
             committed=False,
@@ -4166,7 +4290,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plugin.terminate()
 
-    async def test_private_config_commit_keeps_live_config_for_group_toggle(self) -> None:
+    async def test_private_config_commit_keeps_live_config_for_group_toggle(
+        self,
+    ) -> None:
         config = SnapshotMemoryConfig(
             {
                 "intelligent_interrupt_provider_id": "old-provider",
@@ -4330,7 +4456,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     await save_task
             await plugin.terminate()
 
-    async def test_page_tests_are_non_destructive_and_immediately_recorded(self) -> None:
+    async def test_page_tests_are_non_destructive_and_immediately_recorded(
+        self,
+    ) -> None:
         context = FakePageContext(
             response=LLMResponse("assistant", completion_text="测试生成文案"),
         )
@@ -4353,7 +4481,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 repeat_payload = response_payload(
                     await plugin._web_test_intelligent_repeat(),
                 )
-                mute_payload = response_payload(await plugin._web_test_intelligent_mute())
+                mute_payload = response_payload(
+                    await plugin._web_test_intelligent_mute()
+                )
                 self.assertEqual(repeat_payload["status"], "ok")
                 self.assertEqual(mute_payload["status"], "ok")
                 self.assertEqual(context.provider_calls, [])
@@ -4374,7 +4504,27 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     {record.source for record in history.records},
                     {"manual_test"},
                 )
-                self.assertEqual({record.kind for record in history.records}, {"repeat", "mute"})
+                self.assertEqual(
+                    {record.kind for record in history.records}, {"repeat", "mute"}
+                )
+                with patch("main.request", FakePageRequest()):
+                    history_payload = response_payload(
+                        await plugin._web_get_intelligent_history()
+                    )
+                repeat_record = next(
+                    record
+                    for record in history_payload["data"]["records"]
+                    if record["kind"] == "repeat"
+                )
+                self.assertEqual(
+                    repeat_record["message_text"],
+                    "这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertEqual(
+                    repeat_record["prompt"],
+                    "被复读的内容：这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertEqual(repeat_record["completion"], "测试生成文案")
             finally:
                 await plugin.terminate()
 
@@ -4403,6 +4553,52 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 history = await store.query(window="day", page_size=50)
                 self.assertEqual(history.summary["failed"], 1)
                 self.assertEqual(history.records[0].source, "manual_test")
+                self.assertEqual(
+                    history.records[0].message_text,
+                    "这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertEqual(
+                    history.records[0].prompt,
+                    "被复读的内容：这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertIsNone(history.records[0].completion)
+            finally:
+                await plugin.terminate()
+
+    async def test_unavailable_provider_page_test_records_fixed_details(self) -> None:
+        context = FakePageContext()
+        with tempfile.TemporaryDirectory() as directory:
+            plugin = MemoryRepeater(
+                {},
+                {
+                    "intelligent_interrupt_provider_id": "missing-provider",
+                    "intelligent_interrupt_model": "model-a",
+                },
+                context=context,
+            )
+            store = IntelligentHistoryStore(
+                Path(directory) / "intelligent_history.sqlite3",
+                clock=lambda: datetime.now(timezone.utc),
+            )
+            plugin.history_store = store
+            await plugin.initialize()
+            try:
+                response = await plugin._web_test_intelligent_repeat()
+                payload = response_payload(response)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(payload["data"]["code"], "provider_resolution_failed")
+                self.assertEqual(context.llm_calls, [])
+                history = await store.query(window="day", page_size=50)
+                self.assertEqual(history.summary["failed"], 1)
+                self.assertEqual(
+                    history.records[0].message_text,
+                    "这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertEqual(
+                    history.records[0].prompt,
+                    "被复读的内容：这是智能打断测试使用的固定示例消息。",
+                )
+                self.assertIsNone(history.records[0].completion)
             finally:
                 await plugin.terminate()
 
@@ -4550,7 +4746,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 history = await store.query(window="day", page_size=50)
                 self.assertEqual(history.summary["success"], 1)
                 self.assertEqual(history.summary["fallback"], 1)
-                self.assertEqual({record.source for record in history.records}, {"runtime"})
+                self.assertEqual(
+                    {record.source for record in history.records}, {"runtime"}
+                )
                 record_count = history.summary["total"]
                 context.llm_error = asyncio.CancelledError()
                 with patch("repeater_service.random.random", return_value=0.0):
@@ -4689,7 +4887,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await plugin.terminate()
 
-    async def test_history_write_failure_does_not_interrupt_runtime_delivery(self) -> None:
+    async def test_history_write_failure_does_not_interrupt_runtime_delivery(
+        self,
+    ) -> None:
         context = FakeContext(
             response=LLMResponse("assistant", completion_text="智能打断"),
         )
