@@ -1,10 +1,10 @@
 {
   "pages": {
     "intelligent-console": {
-      "title": "Intelligent Copy Test",
-      "eyebrow": "REPEATER / INTELLIGENT CONSOLE",
-      "heading": "Intelligent Copy Test",
-      "intro": "Save shared generation settings. Tests do not send group messages, mute users, or change group state; results are added to activity records.",
+      "title": "Intelligent Copy Console",
+      "eyebrow": "REPEATER / INTELLIGENT COPY CONSOLE",
+      "heading": "Intelligent Copy Console",
+      "intro": "Configure the generation service shared by intelligent interrupts and mute notices, validate generated copy with fixed simulated inputs, and review call records from the past seven days. Tests return results only to this page: they never send group messages, mute users, or change repeat state.",
       "navigation": {
         "label": "Console navigation",
         "configuration": "Generation setup",
@@ -12,31 +12,31 @@
         "history": "Activity"
       },
       "configuration": {
-        "kicker": "Shared configuration",
-        "title": "Intelligent copy generation settings",
+        "kicker": "Shared by intelligent interrupts and mute notices",
+        "title": "Generation service configuration",
         "mode": {
           "label": "Generation mode",
           "astrbot": "AstrBot chat provider",
           "openai_compatible": "OpenAI-compatible direct",
-          "astrbot_description": "Use an AstrBot-configured chat provider",
-          "astrbot_help": "Use an AstrBot-configured chat provider; a blank provider follows the triggering session.",
-          "manual_help": "Connect directly to an OpenAI-compatible service. Direct generation requires a saved API base URL, API key, and custom model ID, without the AstrBot chat-provider catalog.",
-          "manual_description": "Connect directly to an OpenAI-compatible service"
+          "astrbot_description": "Reuse an AstrBot-configured chat provider",
+          "astrbot_help": "Reuse an AstrBot-configured chat provider. Without a selected provider, production messages follow the triggering session; page tests require a selected and saved provider.",
+          "manual_help": "Call an OpenAI-compatible service directly without reading the AstrBot provider or model catalogs. Generation requires a saved API base URL, API key, and custom model ID.",
+          "manual_description": "Call an OpenAI-compatible service directly"
         },
         "provider": {
           "label": "Chat provider",
           "empty": "Blank: follow triggering session",
-          "help": "A blank provider follows the triggering group-message session and cannot be tested from this page."
+          "help": "Without a selected provider, production messages follow the triggering group-message session; this setting cannot be tested on this page."
         },
         "manual_api_base": {
           "label": "API Base URL",
           "placeholder": "For example, http://localhost:8000/v1",
-          "help": "OpenAI-compatible direct mode only. Direct generation also needs a saved API key and custom model ID. Enter the compatible service root, including any service-required version path."
+          "help": "OpenAI-compatible direct mode only. Enter the service root, including any required version path; generation also needs a saved API key and custom model ID."
         },
         "manual_api_key": {
           "label": "API Key",
           "placeholder": "Leave blank to retain the saved key",
-          "help": "OpenAI-compatible direct mode only. Direct generation also needs a saved API base URL and custom model ID. Leave this input blank to retain the saved key; this page never echoes it.",
+          "help": "OpenAI-compatible direct mode only. Leave this input blank to retain a saved key; the page never displays it. Generation also needs an API base URL and custom model ID.",
           "configured": "Saved; this page never displays the key.",
           "not_configured": "No API key is saved.",
           "clear": "Clear saved key",
@@ -46,9 +46,9 @@
           "label": "Custom model ID",
           "placeholder": "AstrBot mode: leave blank unless overriding the chat provider's model",
           "manual_placeholder": "OpenAI-compatible direct mode requires a custom model ID",
-          "help": "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
-          "manual_help": "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
-          "blank_provider_help": "Without a selected chat provider, production messages follow the triggering session and this page cannot run a test. A custom model ID still overrides the chat provider's model.",
+          "help": "Use this only to override the selected AstrBot chat provider's model. Choose a candidate or enter a model ID.",
+          "manual_help": "OpenAI-compatible direct mode requires a model ID; this page does not query third-party model catalogs.",
+          "blank_provider_help": "Without a selected chat provider, production messages follow the triggering session and this page cannot run a test. A custom model ID still overrides that provider's model.",
           "loading": "Loading model candidates…",
           "unavailable": "Model candidates are unavailable; a custom model ID can still be entered.",
           "provider_selected": "Provider-selected model (no custom model ID specified)"
@@ -65,15 +65,15 @@
       },
       "tests": {
         "repeat": {
-          "kicker": "Fixed simulated input",
-          "title": "Intelligent interrupt test",
-          "description": "Generates one test copy with the saved interrupt prompt. No group message is sent.",
+          "kicker": "Fixed simulated repeated content",
+          "title": "Intelligent interrupt generation test",
+          "description": "Runs the saved intelligent-interrupt prompt against fixed simulated repeated content. Results return only to this page; no group message is sent and repeat state is unchanged.",
           "action": "Test intelligent interrupt"
         },
         "mute": {
-          "kicker": "Fixed simulated input",
-          "title": "Intelligent mute notice test",
-          "description": "Generates copy for “Test user / 60 seconds”. It never mutes, sends a message, or changes group state.",
+          "kicker": "Fixed simulated mute context",
+          "title": "Intelligent mute-notice generation test",
+          "description": "Runs the saved intelligent-mute-notice prompt against “Test user / 60 seconds”. Results return only to this page; no user is muted, no group message is sent, and repeat state is unchanged.",
           "action": "Test intelligent mute"
         },
         "running": "Generating test copy…",
@@ -81,8 +81,8 @@
         "failed": "Test failed: {message}"
       },
       "history": {
-        "kicker": "Select a record to view call details",
-        "title": "LLM call records",
+        "kicker": "Expand a record to view its input and result",
+        "title": "Intelligent copy call records",
         "windows": {
           "label": "Record time range",
           "24h": "24H",
@@ -129,7 +129,7 @@
         "range": "{start} — {end} ({timezone})",
         "loading": "Loading records…",
         "unavailable": "Intelligent record storage is unavailable.",
-        "empty": "There are no records in this time range.",
+        "empty": "No call records match this time range.",
         "pagination": {
           "label": "Record pagination",
           "previous": "Previous",
@@ -138,7 +138,7 @@
         },
         "clear": {
           "action": "Clear records",
-          "confirm": "Clear all LLM call records? This cannot be undone.",
+          "confirm": "Clear all intelligent copy call records? This cannot be undone.",
           "clearing": "Clearing records…",
           "success": "Cleared {count} records."
         },
@@ -151,7 +151,7 @@
           "repeat_user_count": "Repeat users"
         },
 
-        "privacy": "Records retain repeated content, LLM requests, and replies for review here. Data older than seven days is cleaned in the background.",
+        "privacy": "Records can include repeated content, requests, and generated results that can be expanded on this page. Data older than seven days is cleaned periodically in the background.",
         "group": "Group {group}",
         "duration": "Muted {duration} s",
         "not_available": "—"
