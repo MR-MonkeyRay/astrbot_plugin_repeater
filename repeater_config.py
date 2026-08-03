@@ -44,6 +44,7 @@ class RepeaterSettings:
     # 打断复读
     interrupt_default_enabled: bool
     interrupt_disabled_group_ids: set[str]
+    interrupt_threshold: int
     interrupt_probability: float
     interrupt_texts: tuple[str, ...]
 
@@ -143,11 +144,11 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         "repeat.disabled_group_ids",
         logger,
     )
-    threshold = _validated_integer(
+    repeat_threshold = _validated_integer(
         repeat_config.get("threshold", 3),
         "repeat.threshold",
         3,
-        2,
+        3,
         logger,
     )
     probability = _validated_probability(
@@ -167,6 +168,13 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
     interrupt_disabled_group_ids = _load_group_ids(
         interrupt_config.get("disabled_group_ids", []),
         "interrupt.disabled_group_ids",
+        logger,
+    )
+    interrupt_threshold = _validated_integer(
+        interrupt_config.get("threshold", 3),
+        "interrupt.threshold",
+        3,
+        3,
         logger,
     )
     interrupt_probability = _validated_probability(
@@ -293,10 +301,11 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         config=config,
         default_enabled=default_enabled,
         repeat_disabled_group_ids=repeat_disabled_group_ids,
-        repeat_threshold=threshold,
+        repeat_threshold=repeat_threshold,
         repeat_probability=probability,
         interrupt_default_enabled=interrupt_default_enabled,
         interrupt_disabled_group_ids=interrupt_disabled_group_ids,
+        interrupt_threshold=interrupt_threshold,
         interrupt_probability=interrupt_probability,
         interrupt_texts=interrupt_texts,
         interrupt_mute_enabled=interrupt_mute_enabled,

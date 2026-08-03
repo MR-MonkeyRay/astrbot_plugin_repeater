@@ -649,14 +649,19 @@ class RepeaterStateService:
         """
         sender_was_counted = sender_id in state.repeated_users
         state.repeated_users.add(sender_id)
-        threshold_reached = len(state.repeated_users) >= self.settings.repeat_threshold
+        repeat_threshold_reached = (
+            len(state.repeated_users) >= self.settings.repeat_threshold
+        )
+        interrupt_threshold_reached = (
+            len(state.repeated_users) >= self.settings.interrupt_threshold
+        )
         interrupted = (
-            threshold_reached
+            interrupt_threshold_reached
             and interrupt_enabled
             and random.random() < self.settings.interrupt_probability
         )
         should_repeat = (
-            threshold_reached
+            repeat_threshold_reached
             and not interrupted
             and repeat_enabled
             and random.random() < self.settings.repeat_probability

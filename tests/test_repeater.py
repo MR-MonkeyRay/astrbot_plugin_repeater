@@ -64,6 +64,7 @@ class ConfigSchemaTest(unittest.TestCase):
             "interrupt": [
                 "default_enabled",
                 "disabled_group_ids",
+                "threshold",
                 "probability",
                 "texts",
             ],
@@ -100,7 +101,10 @@ class ConfigSchemaTest(unittest.TestCase):
     def test_slider_fields_use_expected_ranges(self) -> None:
         schema = self._load_schema()
         expected_sliders = {
-            ("repeat", "threshold"): ("int", {"min": 2, "max": 50, "step": 1}),
+            ("repeat", "threshold"): ("int", {"min": 3, "max": 50, "step": 1}),
+            ("interrupt", "threshold"): (
+                "int", {"min": 3, "max": 50, "step": 1}
+            ),
             ("repeat", "probability"): (
                 "float",
                 {"min": 0, "max": 1, "step": 0.01},
@@ -135,12 +139,12 @@ class ConfigSchemaTest(unittest.TestCase):
         schema = self._load_schema()
         provider = schema["intelligent_provider"]["items"]
         repeat = schema["repeat"]["items"]
-        self.assertEqual(repeat["threshold"]["description"], "复读/打断触发人数")
-        self.assertIn("打断或普通复读判定", repeat["threshold"]["hint"])
-        self.assertIn(
-            "复读/打断触发人数",
-            schema["interrupt"]["items"]["probability"]["hint"],
-        )
+        interrupt = schema["interrupt"]["items"]
+        self.assertEqual(repeat["threshold"]["description"], "最小复读触发人数")
+        self.assertIn("普通复读判定", repeat["threshold"]["hint"])
+        self.assertEqual(interrupt["threshold"]["description"], "最小打断触发人数")
+        self.assertIn("打断判定", interrupt["threshold"]["hint"])
+        self.assertIn("最小打断触发人数", interrupt["probability"]["hint"])
         self.assertIn(
             DEFAULT_INTERRUPT_MUTE_TEXT,
             schema["mute"]["items"]["texts"]["hint"],
@@ -203,6 +207,7 @@ class ConfigSchemaTest(unittest.TestCase):
             )
 
         self.assertEqual(config["repeat"]["threshold"], 3)
+        self.assertEqual(config["interrupt"]["threshold"], 3)
         self.assertEqual(
             config["interrupt"]["texts"][0], "叮——复读结界已启动，下一位请说点新鲜的！"
         )
@@ -303,6 +308,7 @@ class ConfigModuleTest(unittest.TestCase):
                 "interrupt": {
                     "default_enabled": "yes",
                     "disabled_group_ids": "invalid",
+                    "threshold": True,
                     "probability": True,
                     "texts": (" 打断甲 ", "", 1),
                 },
@@ -323,6 +329,7 @@ class ConfigModuleTest(unittest.TestCase):
         self.assertEqual(settings.repeat_disabled_group_ids, {"1", "group"})
         self.assertEqual(settings.interrupt_disabled_group_ids, set())
         self.assertEqual(settings.repeat_threshold, 3)
+        self.assertEqual(settings.interrupt_threshold, 3)
         self.assertEqual(settings.repeat_probability, 0.3)
         self.assertTrue(settings.default_enabled)
         self.assertEqual(settings.interrupt_probability, 0.1)
@@ -353,6 +360,7 @@ class ConfigModuleTest(unittest.TestCase):
                 "[repeater] repeat.probability 非法(True)，回退为 0.3",
                 "[repeater] interrupt.default_enabled 非法(yes)，回退为 True",
                 "[repeater] interrupt.disabled_group_ids 非法，使用空列表",
+                "[repeater] interrupt.threshold 非法(True)，回退为 3",
                 "[repeater] interrupt.probability 非法(True)，回退为 0.1",
                 "[repeater] mute.enabled 非法(0)，回退为 False",
                 "[repeater] mute.probability 非法(True)，回退为 0.05",
@@ -366,6 +374,34 @@ class ConfigModuleTest(unittest.TestCase):
                 "[repeater] intelligent_mute.prompt 非法或为空，回退为默认智能禁言提示词",
             ],
         )
+
+    def test_trigger_thresholds_enforce_minimum_three(self) -> None:
+        class RecordingLogger:
+            def __init__(self) -> None:
+                self.warnings: list[str] = []
+
+            def warning(self, message: str) -> None:
+                self.warnings.append(message)
+
+        logger = RecordingLogger()
+        settings = build_settings(
+            {
+                "repeat": {"threshold": 2},
+                "interrupt": {"threshold": 2},
+            },
+            logger,
+        )
+
+        self.assertEqual(settings.repeat_threshold, 3)
+        self.assertEqual(settings.interrupt_threshold, 3)
+        self.assertEqual(
+            logger.warnings,
+            [
+                "[repeater] repeat.threshold 非法(2)，回退为 3",
+                "[repeater] interrupt.threshold 非法(2)，回退为 3",
+            ],
+        )
+
 
     def test_manual_provider_settings_validate_without_key_echo(self) -> None:
         class RecordingLogger:
@@ -910,7 +946,7 @@ class MemoryRepeater(RepeaterPlugin):
                 "threshold": 3,
                 "probability": 1.0,
             },
-            "interrupt": {"default_enabled": False},
+            "interrupt": {"default_enabled": False, "threshold": 3},
         }
         effective_config = _merge_grouped_test_config(config, defaults)
         super().__init__(context, effective_config)
@@ -1012,7 +1048,8 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
             repeat_disabled_group_ids=set(),
             interrupt_disabled_group_ids=set(),
             interrupt_mute_disabled_group_ids=set(),
-            repeat_threshold=2,
+            repeat_threshold=3,
+            interrupt_threshold=3,
             repeat_probability=1.0,
             default_enabled=True,
             interrupt_probability=0.0,
@@ -1045,10 +1082,13 @@ class StateServiceBoundaryTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             await service.process_message("group", "A", "1", message),
         )
-        attempt = await service.process_message("group", "B", "2", message)
+        self.assertIsNone(
+            await service.process_message("group", "B", "2", message),
+        )
+        attempt = await service.process_message("group", "C", "3", message)
 
         self.assertIsNotNone(attempt)
-        self.assertEqual(attempt.sender_id, "B")
+        self.assertEqual(attempt.sender_id, "C")
         self.assertEqual(attempt.response_text, "内容")
         self.assertIn(
             "message-fingerprint",
@@ -1272,7 +1312,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
             },
         )
@@ -1291,12 +1331,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "2",
             chain=[Image(file="same-image", url="https://second.example/image")],
         )
+        third_image = FakeEvent(
+            "image",
+            "C",
+            "",
+            "3",
+            chain=[Image(file="same-image", url="https://third.example/image")],
+        )
         await image_plugin.on_group_message(first_image)
         await image_plugin.on_group_message(second_image)
+        await image_plugin.on_group_message(third_image)
 
         self.assertFalse(first_image.sent)
-        self.assertEqual(len(second_image.sent), 1)
-        image_chain = second_image.sent[0]
+        self.assertFalse(second_image.sent)
+        self.assertEqual(len(third_image.sent), 1)
+        image_chain = third_image.sent[0]
         self.assertIsInstance(image_chain, list)
         self.assertIsInstance(image_chain[0], Image)
         self.assertEqual(image_chain[0].file, "same-image")
@@ -1305,18 +1354,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
             },
         )
         await face_plugin.initialize()
         first_face = FakeEvent("face", "A", "", "1", chain=[Face(id=123)])
         second_face = FakeEvent("face", "B", "", "2", chain=[Face(id=123)])
+        third_face = FakeEvent("face", "C", "", "3", chain=[Face(id=123)])
         await face_plugin.on_group_message(first_face)
         await face_plugin.on_group_message(second_face)
+        await face_plugin.on_group_message(third_face)
 
-        self.assertEqual(len(second_face.sent), 1)
-        face_chain = second_face.sent[0]
+        self.assertFalse(second_face.sent)
+        self.assertEqual(len(third_face.sent), 1)
+        face_chain = third_face.sent[0]
         self.assertIsInstance(face_chain[0], Face)
         self.assertEqual(face_chain[0].id, 123)
 
@@ -1325,7 +1377,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
             },
         )
@@ -1358,7 +1410,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
             },
         )
@@ -1388,18 +1440,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         first = mface_event("A", "1", "same", "https://first.example/mface")
         second = mface_event("B", "2", "same", "https://second.example/mface")
+        third = mface_event("C", "3", "same", "https://third.example/mface")
         await plugin.on_group_message(first)
         await plugin.on_group_message(second)
+        await plugin.on_group_message(third)
 
-        self.assertEqual(len(second.sent), 1)
-        replayed = second.sent[0]
+        self.assertFalse(second.sent)
+        self.assertEqual(len(third.sent), 1)
+        replayed = third.sent[0]
         self.assertEqual(
             [segment.toDict()["type"] for segment in replayed],
             ["text", "mface"],
         )
         self.assertEqual(replayed[1].toDict()["data"]["emoji_id"], "same")
 
-        different = mface_event("C", "3", "different", "https://third.example/mface")
+        different = mface_event("D", "4", "different", "https://fourth.example/mface")
         await plugin.on_group_message(different)
         self.assertFalse(different.sent)
 
@@ -1408,7 +1463,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1419,17 +1474,20 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
         first = FakeEvent("media-interrupt", "A", "", "1", chain=[Face(id=456)])
         second = FakeEvent("media-interrupt", "B", "", "2", chain=[Face(id=456)])
+        third = FakeEvent("media-interrupt", "C", "", "3", chain=[Face(id=456)])
         await plugin.on_group_message(first)
         await plugin.on_group_message(second)
+        await plugin.on_group_message(third)
 
-        self.assertEqual(second.sent, [DEFAULT_INTERRUPT_TEXT])
+        self.assertFalse(second.sent)
+        self.assertEqual(third.sent, [DEFAULT_INTERRUPT_TEXT])
 
     async def test_empty_interrupt_texts_sends_default_text(self) -> None:
         plugin = MemoryRepeater(
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1442,11 +1500,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         first = FakeEvent("empty-interrupt", "A", "原始复读内容", "1")
         second = FakeEvent("empty-interrupt", "B", "原始复读内容", "2")
+        third = FakeEvent("empty-interrupt", "C", "原始复读内容", "3")
         await plugin.on_group_message(first)
         await plugin.on_group_message(second)
+        await plugin.on_group_message(third)
 
         self.assertFalse(first.sent)
-        self.assertEqual(second.sent, [DEFAULT_INTERRUPT_TEXT])
+        self.assertFalse(second.sent)
+        self.assertEqual(third.sent, [DEFAULT_INTERRUPT_TEXT])
 
     async def test_interrupt_mute_bans_interrupter_and_sends_notice(self) -> None:
         bot = FakeBot()
@@ -1454,7 +1515,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1472,11 +1533,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10001", "A", "复读内容", "1")
+        second = FakeEvent("10001", "B", "复读内容", "2")
         interrupter = FakeEvent(
             "10001",
             "12345",
             "复读内容",
-            "2",
+            "3",
             bot=bot,
             sender_name="打断者",
             self_id="bot",
@@ -1488,6 +1550,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             patch("main.random.random", return_value=0.0),
         ):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
         self.assertEqual(interrupter.sent, ["打断！", "打断者 被禁言 30s"])
@@ -1522,7 +1585,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1551,11 +1614,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10003", "A", "复读内容", "1")
+        second = FakeEvent("10003", "B", "复读内容", "2")
         interrupter = FakeEvent(
             "10003",
             "12345",
             "复读内容",
-            "2",
+            "3",
             bot=bot,
             sender_name="打断者",
             self_id="bot",
@@ -1567,6 +1631,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             patch("main.random.random", return_value=0.0),
         ):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
         self.assertEqual(interrupter.sent, ["打断！", "智能禁言"])
@@ -1609,7 +1674,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1634,11 +1699,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10004", "A", "复读内容", "1")
+        second = FakeEvent("10004", "B", "复读内容", "2")
         interrupter = FakeEvent(
             "10004",
             "12345",
             "复读内容",
-            "2",
+            "3",
             bot=bot,
             sender_name="打断者",
             self_id="bot",
@@ -1650,6 +1716,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             patch("main.random.random", return_value=0.0),
         ):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
         self.assertEqual(interrupter.sent, ["打断！", "会话禁言"])
@@ -1675,7 +1742,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1700,11 +1767,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10005", "A", "复读内容", "1")
+        second = FakeEvent("10005", "B", "复读内容", "2")
         interrupter = FakeEvent(
             "10005",
             "12345",
             "复读内容",
-            "2",
+            "3",
             bot=bot,
             sender_name="打断者",
             self_id="bot",
@@ -1716,6 +1784,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             patch("main.random.random", return_value=0.0),
         ):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
         self.assertEqual(interrupter.sent, ["打断！", "打断者 被禁言 30s"])
@@ -1787,7 +1856,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                     store,
                     {
                         "repeat": {
-                            "threshold": 2,
+                            "threshold": 3,
                         },
                         "interrupt": {
                             "default_enabled": True,
@@ -1813,11 +1882,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 )
                 await plugin.initialize()
                 first = FakeEvent(group_id, "A", "故障复读", "1")
+                second = FakeEvent(group_id, "B", "故障复读", "2")
                 interrupter = FakeEvent(
                     group_id,
                     "12345",
                     "故障复读",
-                    "2",
+                    "3",
                     bot=bot,
                     sender_name="打断者",
                     self_id="bot",
@@ -1829,6 +1899,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                     patch("main.random.random", return_value=0.0),
                 ):
                     await plugin.on_group_message(first)
+                    await plugin.on_group_message(second)
                     await plugin.on_group_message(interrupter)
 
                 fingerprint = make_fingerprint("故障复读")
@@ -1854,7 +1925,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1882,11 +1953,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10006", "A", "取消禁言提示", "1")
+        second = FakeEvent("10006", "B", "取消禁言提示", "2")
         interrupter = FakeEvent(
             "10006",
             "12345",
             "取消禁言提示",
-            "2",
+            "3",
             bot=bot,
             sender_name="打断者",
             self_id="bot",
@@ -1898,6 +1970,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             patch("main.random.random", return_value=0.0),
         ):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             with self.assertRaises(asyncio.CancelledError):
                 await plugin.on_group_message(interrupter)
 
@@ -1937,7 +2010,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -1952,17 +2025,19 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("10002", "A", "复读内容", "1")
+        second = FakeEvent("10002", "B", "复读内容", "2")
         interrupter = FakeEvent(
             "10002",
             "12345",
             "复读内容",
-            "2",
+            "3",
             bot=bot,
             group_admins=[],
         )
 
         with patch("repeater_service.random.random", return_value=0.0):
             await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
         self.assertEqual(interrupter.sent, ["打断！"])
@@ -1974,11 +2049,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 4,
                     "probability": 1.0,
                 },
                 "interrupt": {
                     "default_enabled": True,
+                    "threshold": 3,
                     "probability": 1.0,
                     "texts": ["打断甲", "打断乙", "打断丙"],
                 },
@@ -1987,6 +2063,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
         first = FakeEvent("interrupt", "A", "原始复读内容", "1")
         second = FakeEvent("interrupt", "B", "原始复读内容", "2")
+        third = FakeEvent("interrupt", "C", "原始复读内容", "3")
 
         with (
             patch("repeater_service.random.random", return_value=0.0),
@@ -1996,10 +2073,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         ):
             await plugin.on_group_message(first)
             await plugin.on_group_message(second)
+            await plugin.on_group_message(third)
 
         self.assertFalse(first.sent)
-        self.assertEqual(second.sent, ["打断乙"])
-        self.assertTrue(second.stopped)
+        self.assertFalse(second.sent)
+        self.assertEqual(third.sent, ["打断乙"])
+        self.assertTrue(third.stopped)
         choice_mock.assert_called_once_with(("打断甲", "打断乙", "打断丙"))
         self.assertIn(
             make_fingerprint("原始复读内容"),
@@ -2014,7 +2093,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2033,14 +2112,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         )
         await plugin.initialize()
         first = FakeEvent("intelligent-success", "A", "原始复读内容", "1")
+        second = FakeEvent("intelligent-success", "B", "原始复读内容", "2")
         triggering_event = FakeEvent(
             "intelligent-success",
-            "B",
+            "C",
             "原始复读内容",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(first)
+        await plugin.on_group_message(second)
         await plugin.on_group_message(triggering_event)
 
         self.assertEqual(triggering_event.sent, ["机智打断"])
@@ -2073,7 +2154,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2090,11 +2171,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-current-provider", "A", "会话内容", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-current-provider", "B", "会话内容", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-current-provider",
-            "B",
+            "C",
             "会话内容",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(triggering_event)
@@ -2123,7 +2207,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2140,11 +2224,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-async-provider", "A", "异步内容", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-async-provider", "B", "异步内容", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-async-provider",
-            "B",
+            "C",
             "异步内容",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(triggering_event)
@@ -2163,7 +2250,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2180,7 +2267,10 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-disabled", "A", "关闭智能", "1"),
         )
-        triggering_event = FakeEvent("intelligent-disabled", "B", "关闭智能", "2")
+        await plugin.on_group_message(
+            FakeEvent("intelligent-disabled", "B", "关闭智能", "2"),
+        )
+        triggering_event = FakeEvent("intelligent-disabled", "C", "关闭智能", "3")
 
         await plugin.on_group_message(triggering_event)
 
@@ -2197,7 +2287,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2214,11 +2304,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-provider-error", "A", "供应商失败", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-provider-error", "B", "供应商失败", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-provider-error",
-            "B",
+            "C",
             "供应商失败",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(triggering_event)
@@ -2243,7 +2336,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2263,11 +2356,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-llm-error", "A", "模型失败", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-llm-error", "B", "模型失败", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-llm-error",
-            "B",
+            "C",
             "模型失败",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(triggering_event)
@@ -2290,7 +2386,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2310,7 +2406,10 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-empty", "A", "空响应", "1"),
         )
-        triggering_event = FakeEvent("intelligent-empty", "B", "空响应", "2")
+        await plugin.on_group_message(
+            FakeEvent("intelligent-empty", "B", "空响应", "2"),
+        )
+        triggering_event = FakeEvent("intelligent-empty", "C", "空响应", "3")
 
         await plugin.on_group_message(triggering_event)
 
@@ -2331,7 +2430,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2351,11 +2450,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-error-response", "A", "错误响应", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-error-response", "B", "错误响应", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-error-response",
-            "B",
+            "C",
             "错误响应",
-            "2",
+            "3",
         )
 
         await plugin.on_group_message(triggering_event)
@@ -2379,7 +2481,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2399,11 +2501,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-retry", "A", "发送重试", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-retry", "B", "发送重试", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-retry",
-            "B",
+            "C",
             "发送重试",
-            "2",
+            "3",
             fail_send=True,
         )
 
@@ -2415,10 +2520,10 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(triggering_event.sent)
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
-        self.assertEqual(state.last_message_id, "1")
+        self.assertEqual(state.last_message_id, "2")
         self.assertEqual(
             store["group_states"]["intelligent-retry"]["last_message_id"],
-            "1",
+            "2",
         )
 
         triggering_event.fail_send = False
@@ -2437,7 +2542,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2457,7 +2562,10 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-cancel", "A", "取消生成", "1"),
         )
-        triggering_event = FakeEvent("intelligent-cancel", "B", "取消生成", "2")
+        await plugin.on_group_message(
+            FakeEvent("intelligent-cancel", "B", "取消生成", "2"),
+        )
+        triggering_event = FakeEvent("intelligent-cancel", "C", "取消生成", "3")
 
         with self.assertRaises(asyncio.CancelledError):
             await plugin.on_group_message(triggering_event)
@@ -2467,7 +2575,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(triggering_event.sent)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
-        self.assertEqual(state.last_message_id, "1")
+        self.assertEqual(state.last_message_id, "2")
         self.assertNotIn(
             fingerprint,
             store["group_states"]["intelligent-cancel"]["pending_fingerprints"],
@@ -2489,7 +2597,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2510,11 +2618,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-cancel-rollback", "A", "取消回滚", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-cancel-rollback", "B", "取消回滚", "2"),
+        )
         triggering_event = FakeEvent(
             "intelligent-cancel-rollback",
-            "B",
+            "C",
             "取消回滚",
-            "2",
+            "3",
         )
 
         with patch("main.logger.exception") as exception_logger:
@@ -2531,19 +2642,19 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
                 "pending_fingerprints"
             ],
         )
-        self.assertEqual(state.last_message_id, "2")
+        self.assertEqual(state.last_message_id, "3")
         self.assertEqual(
             store["group_states"]["intelligent-cancel-rollback"]["last_message_id"],
-            "2",
+            "3",
         )
         exception_logger.assert_called_once()
         self.assertIn("回滚保存失败", exception_logger.call_args.args[0])
 
         suppressed_event = FakeEvent(
             "intelligent-cancel-rollback",
-            "C",
+            "D",
             "取消回滚",
-            "3",
+            "4",
         )
         await plugin.on_group_message(suppressed_event)
         self.assertFalse(suppressed_event.sent)
@@ -2557,7 +2668,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store,
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -2577,11 +2688,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(
             FakeEvent("intelligent-send-cancel", "A", "发送取消", "1"),
         )
+        await plugin.on_group_message(
+            FakeEvent("intelligent-send-cancel", "B", "发送取消", "2"),
+        )
         triggering_event = DelayedEvent(
             "intelligent-send-cancel",
-            "B",
+            "C",
             "发送取消",
-            "2",
+            "3",
         )
         handler_task = asyncio.create_task(plugin.on_group_message(triggering_event))
         await triggering_event.send_started.wait()
@@ -2599,13 +2713,13 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             fingerprint,
             store["group_states"]["intelligent-send-cancel"]["pending_fingerprints"],
         )
-        self.assertEqual(state.last_message_id, "2")
+        self.assertEqual(state.last_message_id, "3")
 
         suppressed_event = FakeEvent(
             "intelligent-send-cancel",
-            "C",
+            "D",
             "发送取消",
-            "3",
+            "4",
         )
         await plugin.on_group_message(suppressed_event)
         self.assertFalse(suppressed_event.sent)
@@ -2617,7 +2731,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
                 "interrupt": {
@@ -2630,6 +2744,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
         first = FakeEvent("fallthrough", "A", "继续复读", "1")
         second = FakeEvent("fallthrough", "B", "继续复读", "2")
+        third = FakeEvent("fallthrough", "C", "继续复读", "3")
 
         with (
             patch(
@@ -2639,8 +2754,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         ):
             await plugin.on_group_message(first)
             await plugin.on_group_message(second)
+            await plugin.on_group_message(third)
 
-        self.assertEqual(second.sent, ["继续复读"])
+        self.assertEqual(third.sent, ["继续复读"])
         self.assertEqual(random_mock.call_count, 2)
         choice_mock.assert_not_called()
 
@@ -2678,7 +2794,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
@@ -2686,8 +2802,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
 
         await plugin.on_group_message(FakeEvent("precommit", "A", "保存失败", "1"))
+        await plugin.on_group_message(FakeEvent("precommit", "B", "保存失败", "2"))
         plugin.fail_next_put = True
-        triggering_event = FakeEvent("precommit", "B", "保存失败", "2")
+        triggering_event = FakeEvent("precommit", "C", "保存失败", "3")
         with self.assertRaisesRegex(RuntimeError, "put failed"):
             await plugin.on_group_message(triggering_event)
 
@@ -2696,7 +2813,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(triggering_event.sent)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
-        self.assertEqual(state.last_message_id, "1")
+        self.assertEqual(state.last_message_id, "2")
 
         await plugin.on_group_message(triggering_event)
         self.assertEqual(triggering_event.sent, ["保存失败"])
@@ -2708,7 +2825,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
@@ -2716,11 +2833,12 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
 
         await plugin.on_group_message(FakeEvent("retry", "A", "重试", "1"))
+        await plugin.on_group_message(FakeEvent("retry", "B", "重试", "2"))
         failing_event = FakeEvent(
             "retry",
-            "B",
+            "C",
             "重试",
-            "2",
+            "3",
             fail_send=True,
         )
         with self.assertRaisesRegex(RuntimeError, "send failed"):
@@ -2730,7 +2848,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         fingerprint = make_fingerprint("重试")
         self.assertNotIn(fingerprint, state.repeated_fingerprints)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
-        self.assertEqual(state.last_message_id, "1")
+        self.assertEqual(state.last_message_id, "2")
 
         failing_event.fail_send = False
         await plugin.on_group_message(failing_event)
@@ -2744,20 +2862,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
         )
         await plugin.initialize()
         await plugin.on_group_message(FakeEvent("rollback", "A", "保守回滚", "1"))
+        await plugin.on_group_message(FakeEvent("rollback", "B", "保守回滚", "2"))
 
         failing_event = FailNextPutAfterSendEvent(
             plugin,
             "rollback",
-            "B",
+            "C",
             "保守回滚",
-            "2",
+            "3",
             fail_send=True,
         )
         with self.assertRaisesRegex(RuntimeError, "send failed"):
@@ -2771,7 +2890,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store["group_states"]["rollback"]["pending_fingerprints"],
         )
 
-        suppressed_event = FakeEvent("rollback", "C", "保守回滚", "3")
+        suppressed_event = FakeEvent("rollback", "D", "保守回滚", "4")
         await plugin.on_group_message(suppressed_event)
         self.assertFalse(suppressed_event.sent)
 
@@ -2784,20 +2903,21 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
         )
         await plugin.initialize()
         await plugin.on_group_message(FakeEvent("commit", "A", "保守提交", "1"))
+        await plugin.on_group_message(FakeEvent("commit", "B", "保守提交", "2"))
 
         triggering_event = FailNextPutAfterSendEvent(
             plugin,
             "commit",
-            "B",
+            "C",
             "保守提交",
-            "2",
+            "3",
         )
         with self.assertRaisesRegex(RuntimeError, "put failed"):
             await plugin.on_group_message(triggering_event)
@@ -2812,7 +2932,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             store["group_states"]["commit"]["pending_fingerprints"],
         )
 
-        suppressed_event = FakeEvent("commit", "C", "保守提交", "3")
+        suppressed_event = FakeEvent("commit", "D", "保守提交", "4")
         await plugin.on_group_message(suppressed_event)
         self.assertFalse(suppressed_event.sent)
 
@@ -2822,7 +2942,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
@@ -2830,17 +2950,18 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
 
         await plugin.on_group_message(FakeEvent("race", "A", "内容 A", "1"))
-        triggering_event = DelayedEvent("race", "B", "内容 A", "2")
+        await plugin.on_group_message(FakeEvent("race", "B", "内容 A", "2"))
+        triggering_event = DelayedEvent("race", "C", "内容 A", "3")
         send_task = asyncio.create_task(plugin.on_group_message(triggering_event))
         await triggering_event.send_started.wait()
 
-        await plugin.on_group_message(FakeEvent("race", "C", "内容 B", "3"))
+        await plugin.on_group_message(FakeEvent("race", "D", "内容 B", "4"))
         triggering_event.release_send.set()
         await send_task
 
         state = plugin.state_service.group_states["race"]
         self.assertEqual(state.last_fingerprint, make_fingerprint("内容 B"))
-        self.assertEqual(state.repeated_users, {"C"})
+        self.assertEqual(state.repeated_users, {"D"})
 
     async def test_group_override_and_default_are_independent(self) -> None:
         plugin = MemoryRepeater({})
@@ -2893,6 +3014,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
 
         state = plugin.state_service.group_states["interrupt-command"]
         self.assertEqual(status_reply[0].splitlines()[0], "本群打断复读：关闭")
+        self.assertIn("最小打断触发人数：3 名独立用户", status_reply[0])
         self.assertEqual(open_reply, ["已在本群开启打断复读。"])
         self.assertTrue(
             plugin.state_service.is_interrupt_enabled("interrupt-command", state)
@@ -3173,6 +3295,7 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         await plugin.on_group_message(FakeEvent("disabled", "A", "忽略", "2"))
 
         self.assertEqual(reply[0].splitlines()[0], "本群自动复读：关闭")
+        self.assertIn("最小复读触发人数：3 名独立用户", reply[0])
         self.assertNotIn("disabled", plugin.state_service.group_states)
         self.assertNotIn("disabled", plugin.state_service.group_locks)
         self.assertEqual(store, {})
@@ -3289,15 +3412,16 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             {
                 "repeat": {
                     "default_enabled": True,
-                    "threshold": 2,
+                    "threshold": 3,
                     "probability": 1.0,
                 },
             },
         )
         await plugin.initialize()
         await plugin.on_group_message(FakeEvent("reload", "A", "热重载", "1"))
+        await plugin.on_group_message(FakeEvent("reload", "B", "热重载", "2"))
 
-        triggering_event = DelayedEvent("reload", "B", "热重载", "2")
+        triggering_event = DelayedEvent("reload", "C", "热重载", "3")
         send_task = asyncio.create_task(plugin.on_group_message(triggering_event))
         await triggering_event.send_started.wait()
         terminate_task = asyncio.create_task(plugin.terminate())
@@ -4021,7 +4145,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     {},
                     {
                         "repeat": {
-                            "threshold": 2,
+                            "threshold": 3,
                         },
                         "interrupt": {
                             "default_enabled": True,
@@ -4048,8 +4172,10 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 try:
                     first = FakeEvent("manual-runtime", "A", "测试复读内容", "1")
                     second = FakeEvent("manual-runtime", "B", "测试复读内容", "2")
+                    third = FakeEvent("manual-runtime", "C", "测试复读内容", "3")
                     await plugin.on_group_message(first)
                     await plugin.on_group_message(second)
+                    await plugin.on_group_message(third)
                     repeat_payload = response_payload(
                         await plugin._web_test_intelligent_repeat(),
                     )
@@ -4058,7 +4184,8 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     )
                     await plugin._drain_history_write_tasks()
 
-                    self.assertEqual(second.sent, ["manual OpenAI-compatible reply"])
+                    self.assertFalse(second.sent)
+                    self.assertEqual(third.sent, ["manual OpenAI-compatible reply"])
                     self.assertEqual(repeat_payload["status"], "ok")
                     self.assertEqual(mute_payload["status"], "ok")
                     self.assertEqual(
@@ -4113,7 +4240,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                         runtime_record.completion,
                         "manual OpenAI-compatible reply",
                     )
-                    self.assertEqual(runtime_record.repeat_user_count, 2)
+                    self.assertEqual(runtime_record.repeat_user_count, 3)
                     self.assertNotIn(
                         api_key,
                         json.dumps(history.to_dict(), ensure_ascii=False),
@@ -4143,7 +4270,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     {},
                     {
                         "repeat": {
-                            "threshold": 2,
+                            "threshold": 3,
                         },
                         "interrupt": {
                             "default_enabled": True,
@@ -4170,14 +4297,16 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 try:
                     first = FakeEvent("manual-echo", "A", "测试复读内容", "1")
                     second = FakeEvent("manual-echo", "B", "测试复读内容", "2")
+                    third = FakeEvent("manual-echo", "C", "测试复读内容", "3")
                     with patch("main.logger", captured_logger):
                         await plugin.on_group_message(first)
                         await plugin.on_group_message(second)
+                        await plugin.on_group_message(third)
                         page_response = await plugin._web_test_intelligent_repeat()
                     await plugin._drain_history_write_tasks()
 
                     page_payload = response_payload(page_response)
-                    self.assertEqual(second.sent, ["static interrupt"])
+                    self.assertEqual(third.sent, ["static interrupt"])
                     self.assertEqual(page_response.status_code, 502)
                     self.assertEqual(
                         page_payload["data"]["code"],
@@ -4207,7 +4336,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 {},
                 {
                     "repeat": {
-                        "threshold": 2,
+                        "threshold": 3,
                     },
                     "interrupt": {
                         "default_enabled": True,
@@ -4237,13 +4366,15 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     first = FakeEvent("manual-fallback", "A", "缺少 Key", "1")
                     second = FakeEvent("manual-fallback", "B", "缺少 Key", "2")
+                    third = FakeEvent("manual-fallback", "C", "缺少 Key", "3")
                     await plugin.on_group_message(first)
                     await plugin.on_group_message(second)
+                    await plugin.on_group_message(third)
                     page_response = await plugin._web_test_intelligent_repeat()
                 await plugin._drain_history_write_tasks()
 
                 page_payload = response_payload(page_response)
-                self.assertEqual(second.sent, ["static interrupt"])
+                self.assertEqual(third.sent, ["static interrupt"])
                 self.assertEqual(page_response.status_code, 409)
                 self.assertEqual(
                     page_payload["data"]["code"],
@@ -4974,7 +5105,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 {},
                 {
                     "repeat": {
-                        "threshold": 2,
+                        "threshold": 3,
                     },
                     "interrupt": {
                         "default_enabled": True,
@@ -5001,6 +5132,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             async def trigger(group_id: str, text: str) -> None:
                 await plugin.on_group_message(FakeEvent(group_id, "A", text, "1"))
                 await plugin.on_group_message(FakeEvent(group_id, "B", text, "2"))
+                await plugin.on_group_message(FakeEvent(group_id, "C", text, "3"))
 
             try:
                 with patch("repeater_service.random.random", return_value=0.0):
@@ -5021,9 +5153,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     await plugin.on_group_message(
                         FakeEvent("history-cancel", "A", "取消记录", "1"),
                     )
+                    await plugin.on_group_message(
+                        FakeEvent("history-cancel", "B", "取消记录", "2"),
+                    )
                     with self.assertRaises(asyncio.CancelledError):
                         await plugin.on_group_message(
-                            FakeEvent("history-cancel", "B", "取消记录", "2"),
+                            FakeEvent("history-cancel", "C", "取消记录", "3"),
                         )
                 await asyncio.sleep(0)
                 after_cancellation = await store.query(window="day", page_size=50)
@@ -5042,7 +5177,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 {},
                 {
                     "repeat": {
-                        "threshold": 2,
+                        "threshold": 3,
                     },
                     "interrupt": {
                         "default_enabled": True,
@@ -5070,9 +5205,12 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     await plugin.on_group_message(
                         FakeEvent("drain-history", "A", "内容", "1"),
                     )
+                    await plugin.on_group_message(
+                        FakeEvent("drain-history", "B", "内容", "2"),
+                    )
                     runtime_task = asyncio.create_task(
                         plugin.on_group_message(
-                            FakeEvent("drain-history", "B", "内容", "2"),
+                            FakeEvent("drain-history", "C", "内容", "3"),
                         ),
                     )
                     await context.generation_started.wait()
@@ -5124,7 +5262,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -5160,6 +5298,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 await plugin.on_group_message(
                     FakeEvent("snapshot", "B", "内容", "2"),
                 )
+                await plugin.on_group_message(
+                    FakeEvent("snapshot", "C", "内容", "3"),
+                )
 
             self.assertEqual(plugin.state_service.settings_reads, 1)
             call = context.llm_calls[0]
@@ -5179,7 +5320,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
             {},
             {
                 "repeat": {
-                    "threshold": 2,
+                    "threshold": 3,
                 },
                 "interrupt": {
                     "default_enabled": True,
@@ -5198,9 +5339,11 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         await plugin.initialize()
         try:
             first = FakeEvent("history-write-error", "A", "隔离失败", "1")
-            trigger = FakeEvent("history-write-error", "B", "隔离失败", "2")
+            second = FakeEvent("history-write-error", "B", "隔离失败", "2")
+            trigger = FakeEvent("history-write-error", "C", "隔离失败", "3")
             with patch("repeater_service.random.random", return_value=0.0):
                 await plugin.on_group_message(first)
+                await plugin.on_group_message(second)
                 await plugin.on_group_message(trigger)
             if plugin._history_write_tasks:
                 await asyncio.gather(*tuple(plugin._history_write_tasks))

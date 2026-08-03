@@ -1603,6 +1603,7 @@ class RepeaterPlugin(Star):
             if interrupt:
                 base_info = (
                     f"本群{noun}：{status}\n"
+                    f"最小打断触发人数：{settings.interrupt_threshold} 名独立用户\n"
                     f"打断概率：{settings.interrupt_probability * 100:g}%\n"
                     f"可选文本：{len(settings.interrupt_texts)} 条"
                 )
@@ -1620,7 +1621,7 @@ class RepeaterPlugin(Star):
                 return base_info + mute_info
             return (
                 f"本群{noun}：{status}\n"
-                f"触发阈值：{settings.repeat_threshold} 名独立用户\n"
+                f"最小复读触发人数：{settings.repeat_threshold} 名独立用户\n"
                 f"触发概率：{settings.repeat_probability * 100:g}%"
             )
 

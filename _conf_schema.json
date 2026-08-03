@@ -20,16 +20,16 @@
       "threshold": {
         "type": "int",
         "default": 3,
-        "slider": {"min": 2, "max": 50, "step": 1},
-        "description": "复读/打断触发人数",
-        "hint": "同一内容需由多少名不同用户发送（含首位）后，才会进入打断或普通复读判定。"
+        "slider": {"min": 3, "max": 50, "step": 1},
+        "description": "最小复读触发人数",
+        "hint": "同一内容需由多少名不同用户发送（含首位）后，才会进入普通复读判定。"
       },
       "probability": {
         "type": "float",
         "default": 0.3,
         "slider": {"min": 0, "max": 1, "step": 0.01},
         "description": "复读概率",
-        "hint": "达到复读/打断触发人数且未命中打断时，回发原消息的概率（0%–100%）。"
+        "hint": "达到最小复读触发人数且未命中打断时，回发原消息的概率（0%–100%）。"
       }
     }
   },
@@ -51,12 +51,19 @@
         "description": "关闭打断复读的群号",
         "hint": "由打断复读开关指令维护；列表中的群不触发打断复读。"
       },
+      "threshold": {
+        "type": "int",
+        "default": 3,
+        "slider": {"min": 3, "max": 50, "step": 1},
+        "description": "最小打断触发人数",
+        "hint": "同一内容需由多少名不同用户发送（含首位）后，才会进入打断判定。"
+      },
       "probability": {
         "type": "float",
         "default": 0.1,
         "slider": {"min": 0, "max": 1, "step": 0.01},
         "description": "打断概率",
-        "hint": "达到复读/打断触发人数后，优先发送打断文本的概率（0%–100%）。"
+        "hint": "达到最小打断触发人数后，优先发送打断文本的概率（0%–100%）。"
       },
       "texts": {
         "type": "list",
