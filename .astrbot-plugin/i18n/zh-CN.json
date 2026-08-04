@@ -1,42 +1,42 @@
 {
   "pages": {
     "intelligent-console": {
-      "title": "智能文案控制台",
-      "eyebrow": "REPEATER / INTELLIGENT COPY CONSOLE",
-      "heading": "智能文案控制台",
-      "intro": "配置智能打断与智能禁言提示共用的生成服务，使用固定模拟输入验证生成结果，并查看近七天的调用记录。测试结果仅返回当前页面，不发送群消息、不执行禁言，也不修改复读状态。",
+      "title": "复读机控制台",
+      "eyebrow": "REPEATER / LLM CALL CONSOLE",
+      "heading": "复读机控制台",
+      "intro": "配置智能打断与智能禁言提示共用的 LLM供应商，使用固定模拟输入验证LLM调用结果，并查看近七天的调用记录。LLM调用测试结果仅返回当前页面，不发送群消息、不执行禁言，也不修改复读状态。",
       "navigation": {
         "label": "页面导航",
-        "configuration": "生成设置",
-        "tests": "文案测试",
-        "history": "运行记录"
+        "configuration": "LLM供应商设置",
+        "tests": "LLM调用测试",
+        "history": "调用记录"
       },
       "configuration": {
         "kicker": "智能打断与禁言提示共用",
-        "title": "生成服务配置",
+        "title": "LLM供应商配置",
         "mode": {
-          "label": "生成方式",
+          "label": "供应商接入方式",
           "astrbot": "AstrBot 聊天供应商",
           "openai_compatible": "OpenAI 兼容直连",
           "astrbot_description": "复用 AstrBot 中已配置的聊天供应商",
-          "astrbot_help": "复用 AstrBot 中已配置的聊天供应商。未指定供应商时，运行消息会跟随触发会话；页面测试必须先选择并保存供应商。",
-          "manual_help": "直接调用 OpenAI 兼容服务，不读取 AstrBot 的供应商或模型目录。生成前必须保存 API Base URL、API Key 和自定义模型 ID。",
+          "astrbot_help": "复用 AstrBot 中已配置的聊天供应商。未指定供应商时，运行消息会跟随触发会话；LLM调用测试必须先选择并保存供应商。",
+          "manual_help": "直接调用 OpenAI 兼容服务，不读取 AstrBot 的供应商或模型目录。LLM调用前必须保存 API Base URL、API Key 和自定义模型 ID。",
           "manual_description": "直接调用 OpenAI 兼容服务"
         },
         "provider": {
           "label": "聊天供应商",
           "empty": "留空：跟随触发会话",
-          "help": "未指定供应商时，运行消息会跟随触发群消息的会话；页面测试不能使用该设置。"
+          "help": "未指定供应商时，运行消息会跟随触发群消息的会话；LLM调用测试不能使用该设置。"
         },
         "manual_api_base": {
           "label": "API Base URL",
           "placeholder": "例如 http://localhost:8000/v1",
-          "help": "仅用于 OpenAI 兼容直连。填写服务根路径（可含服务要求的版本路径）；生成还需要已保存的 API Key 与自定义模型 ID。"
+          "help": "仅用于 OpenAI 兼容直连。填写服务根路径（可含服务要求的版本路径）；LLM调用还需要已保存的 API Key 与自定义模型 ID。"
         },
         "manual_api_key": {
           "label": "API Key",
           "placeholder": "留空以保留已保存的 Key",
-          "help": "仅用于 OpenAI 兼容直连。留空可保留已保存的 Key；本页不会显示 Key。生成还需要 API Base URL 和自定义模型 ID。",
+          "help": "仅用于 OpenAI 兼容直连。留空可保留已保存的 Key；本页不会显示 Key。LLM调用还需要 API Base URL 和自定义模型 ID。",
           "configured": "已保存；页面不会显示 Key。",
           "not_configured": "尚未保存 API Key。",
           "clear": "清除已保存的 Key",
@@ -66,25 +66,25 @@
       "tests": {
         "repeat": {
           "kicker": "固定模拟复读内容",
-          "title": "智能打断生成测试",
-          "description": "以固定模拟复读内容调用已保存的智能打断提示词。结果只返回当前页面，不发送群消息，也不修改复读状态。",
-          "action": "测试智能打断"
+          "title": "智能打断 LLM调用测试",
+          "description": "以固定模拟复读内容执行已保存的智能打断 LLM调用。结果只返回当前页面，不发送群消息，也不修改复读状态。",
+          "action": "测试智能打断 LLM调用"
         },
         "mute": {
           "kicker": "固定模拟禁言信息",
-          "title": "智能禁言提示生成测试",
-          "description": "以“测试用户 / 60 秒”为固定输入调用已保存的智能禁言提示词。结果只返回当前页面，不执行禁言、不发送群消息，也不修改复读状态。",
-          "action": "测试智能禁言"
+          "title": "智能禁言提示 LLM调用测试",
+          "description": "以“测试用户 / 60 秒”为固定输入执行已保存的智能禁言提示 LLM调用。结果只返回当前页面，不执行禁言、不发送群消息，也不修改复读状态。",
+          "action": "测试智能禁言 LLM调用"
         },
-        "running": "正在生成测试文案…",
+        "running": "正在执行LLM调用测试…",
         "result": "{provider} · {model} · {latency} ms\n{text}",
         "failed": "测试失败：{message}"
       },
       "history": {
-        "kicker": "展开记录查看输入与生成结果",
-        "title": "智能文案调用记录",
+        "kicker": "展开记录查看输入与调用结果",
+        "title": "调用记录",
         "windows": {
-          "label": "记录时间范围",
+          "label": "调用记录时间范围",
           "24h": "24H",
           "2d": "2天",
           "3d": "3天",
@@ -115,7 +115,7 @@
         },
         "source": {
           "runtime": "运行时",
-          "manual_test": "手动测试"
+          "manual_test": "手动LLM调用测试"
         },
         "action": {
           "repeat": "智能打断",
@@ -127,18 +127,18 @@
           "failed": "失败"
         },
         "range": "{start} — {end}（{timezone}）",
-        "loading": "正在读取记录…",
-        "unavailable": "智能记录存储不可用。",
+        "loading": "正在读取调用记录…",
+        "unavailable": "调用记录存储不可用。",
         "empty": "所选时间范围内暂无调用记录。",
         "pagination": {
-          "label": "记录分页",
+          "label": "调用记录分页",
           "previous": "上一页",
           "next": "下一页",
           "page": "第 {page} / {total} 页"
         },
         "clear": {
-          "action": "清理记录",
-          "confirm": "清理全部智能文案调用记录？此操作无法撤销。",
+          "action": "清理调用记录",
+          "confirm": "清理全部调用记录？此操作无法撤销。",
           "clearing": "正在清理记录…",
           "success": "已清理 {count} 条记录。"
         },
@@ -152,7 +152,7 @@
         },
 
 
-        "privacy": "调用记录可包含复读内容、请求内容和生成结果，可在此页展开查看；超过七天的数据由后台定期清理。",
+        "privacy": "调用记录可包含复读内容、LLM请求和调用结果，可在此页展开查看；超过七天的数据由后台定期清理。",
         "group": "群 {group}",
         "duration": "禁言 {duration} 秒",
         "not_available": "—"

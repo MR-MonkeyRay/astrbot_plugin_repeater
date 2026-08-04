@@ -4,17 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>智能文案控制台</title>
+    <title>复读机控制台</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="console-shell" aria-labelledby="page-title">
       <header class="masthead">
         <div>
-          <p class="eyebrow" data-i18n="eyebrow">REPEATER / INTELLIGENT COPY CONSOLE</p>
-          <h1 id="page-title" data-i18n="heading">智能文案控制台</h1>
+          <p class="eyebrow" data-i18n="eyebrow">REPEATER / LLM CALL CONSOLE</p>
+          <h1 id="page-title" data-i18n="heading">复读机控制台</h1>
           <p class="lede" data-i18n="intro">
-            配置智能打断与智能禁言提示共用的生成服务，使用固定模拟输入验证生成结果，并查看近七天的调用记录。测试结果仅返回当前页面，不发送群消息、不执行禁言，也不修改复读状态。
+            配置智能打断与智能禁言提示共用的 LLM供应商，使用固定模拟输入验证LLM调用结果，并查看近七天的调用记录。LLM调用测试结果仅返回当前页面，不发送群消息、不执行禁言，也不修改复读状态。
           </p>
         </div>
         <div class="runtime-status" aria-label="智能功能状态">
@@ -40,7 +40,7 @@
           tabindex="0"
         >
           <span class="view-tab-index" aria-hidden="true">01</span>
-          <span data-i18n="navigation.configuration">生成设置</span>
+          <span data-i18n="navigation.configuration">LLM供应商设置</span>
         </button>
         <button
           class="view-tab"
@@ -53,7 +53,7 @@
           tabindex="-1"
         >
           <span class="view-tab-index" aria-hidden="true">02</span>
-          <span data-i18n="navigation.tests">文案测试</span>
+          <span data-i18n="navigation.tests">LLM调用测试</span>
         </button>
         <button
           class="view-tab"
@@ -66,7 +66,7 @@
           tabindex="-1"
         >
           <span class="view-tab-index" aria-hidden="true">03</span>
-          <span data-i18n="navigation.history">运行记录</span>
+          <span data-i18n="navigation.history">调用记录</span>
         </button>
       </nav>
 
@@ -81,7 +81,7 @@
           <div class="panel-heading">
             <div>
               <p class="section-kicker" data-i18n="configuration.kicker">智能打断与禁言提示共用</p>
-              <h2 id="configuration-title" data-i18n="configuration.title">生成服务配置</h2>
+              <h2 id="configuration-title" data-i18n="configuration.title">LLM供应商配置</h2>
             </div>
             <output id="config-feedback" class="feedback" aria-live="polite"></output>
           </div>
@@ -92,7 +92,7 @@
                 class="route-choice-label"
                 id="provider-mode-label"
                 data-i18n="configuration.mode.label"
-              >生成方式</p>
+              >供应商接入方式</p>
               <div
                 class="route-tabs"
                 role="radiogroup"
@@ -125,7 +125,7 @@
                 </button>
               </div>
               <p id="provider-mode-help" class="route-help" data-i18n="configuration.mode.astrbot_help">
-                复用 AstrBot 中已配置的聊天供应商。未指定供应商时，运行消息会跟随触发会话；页面测试必须先选择并保存供应商。
+                复用 AstrBot 中已配置的聊天供应商。未指定供应商时，运行消息会跟随触发会话；LLM调用测试必须先选择并保存供应商。
               </p>
             </div>
 
@@ -134,7 +134,7 @@
                 <span data-i18n="configuration.provider.label">聊天供应商</span>
                 <select id="provider-select" aria-describedby="provider-help" disabled></select>
                 <small id="provider-help" data-i18n="configuration.provider.help">
-                  未指定供应商时，运行消息会跟随触发群消息的会话；页面测试不能使用该设置。
+                  未指定供应商时，运行消息会跟随触发群消息的会话；LLM调用测试不能使用该设置。
                 </small>
               </label>
               <label class="field field--manual-base" id="manual-api-base-field" hidden>
@@ -149,7 +149,7 @@
                   disabled
                 />
                 <small data-i18n="configuration.manual_api_base.help">
-                  仅用于 OpenAI 兼容直连。填写服务根路径（可含服务要求的版本路径）；生成还需要已保存的 API Key 与自定义模型 ID。
+                  仅用于 OpenAI 兼容直连。填写服务根路径（可含服务要求的版本路径）；LLM调用还需要已保存的 API Key 与自定义模型 ID。
                 </small>
               </label>
               <div class="field field--manual-key" id="manual-api-key-field" hidden>
@@ -171,7 +171,7 @@
                   </button>
                 </div>
                 <small id="manual-api-key-help" data-i18n="configuration.manual_api_key.help">
-                  仅用于 OpenAI 兼容直连。留空可保留已保存的 Key；本页不会显示 Key。生成还需要 API Base URL 和自定义模型 ID。
+                  仅用于 OpenAI 兼容直连。留空可保留已保存的 Key；本页不会显示 Key。LLM调用还需要 API Base URL 和自定义模型 ID。
                 </small>
               </div>
               <label class="field field--model">
@@ -213,13 +213,13 @@
           <article class="panel test-card" aria-labelledby="repeat-test-title">
             <div class="test-card-heading">
               <p class="section-kicker" data-i18n="tests.repeat.kicker">固定模拟复读内容</p>
-              <h2 id="repeat-test-title" data-i18n="tests.repeat.title">智能打断生成测试</h2>
+              <h2 id="repeat-test-title" data-i18n="tests.repeat.title">智能打断 LLM调用测试</h2>
             </div>
             <p class="test-copy" data-i18n="tests.repeat.description">
-              以固定模拟复读内容调用已保存的智能打断提示词。结果只返回当前页面，不发送群消息，也不修改复读状态。
+              以固定模拟复读内容执行已保存的智能打断 LLM调用。结果只返回当前页面，不发送群消息，也不修改复读状态。
             </p>
             <button class="button button-secondary" id="test-repeat" type="button">
-              <span data-i18n="tests.repeat.action">测试智能打断</span>
+              <span data-i18n="tests.repeat.action">测试智能打断 LLM调用</span>
             </button>
             <output id="repeat-result" class="test-result" aria-live="polite"></output>
           </article>
@@ -227,13 +227,13 @@
           <article class="panel test-card" aria-labelledby="mute-test-title">
             <div class="test-card-heading">
               <p class="section-kicker" data-i18n="tests.mute.kicker">固定模拟禁言信息</p>
-              <h2 id="mute-test-title" data-i18n="tests.mute.title">智能禁言提示生成测试</h2>
+              <h2 id="mute-test-title" data-i18n="tests.mute.title">智能禁言提示 LLM调用测试</h2>
             </div>
             <p class="test-copy" data-i18n="tests.mute.description">
-              以“测试用户 / 60 秒”为固定输入调用已保存的智能禁言提示词。结果只返回当前页面，不执行禁言、不发送群消息，也不修改复读状态。
+              以“测试用户 / 60 秒”为固定输入执行已保存的智能禁言提示 LLM调用。结果只返回当前页面，不执行禁言、不发送群消息，也不修改复读状态。
             </p>
             <button class="button button-warning" id="test-mute" type="button">
-              <span data-i18n="tests.mute.action">测试智能禁言</span>
+              <span data-i18n="tests.mute.action">测试智能禁言 LLM调用</span>
             </button>
             <output id="mute-result" class="test-result" aria-live="polite"></output>
           </article>
@@ -251,8 +251,8 @@
         <section class="panel history-panel" aria-labelledby="history-title">
           <div class="panel-heading history-heading">
             <div>
-              <p class="section-kicker" data-i18n="history.kicker">展开记录查看输入与生成结果</p>
-              <h2 id="history-title" data-i18n="history.title">智能文案调用记录</h2>
+              <p class="section-kicker" data-i18n="history.kicker">展开记录查看输入与调用结果</p>
+              <h2 id="history-title" data-i18n="history.title">调用记录</h2>
               <p class="history-note" id="history-range" aria-live="polite"></p>
             </div>
             <output id="history-feedback" class="feedback" aria-live="polite"></output>
@@ -262,7 +262,7 @@
             <div
               class="range-tabs"
               role="group"
-              aria-label="记录时间范围"
+              aria-label="调用记录时间范围"
               data-i18n-aria-label="history.windows.label"
             >
               <button class="range-tab is-active" data-window="24h" type="button" aria-pressed="true" data-i18n="history.windows.24h">24H</button>
@@ -280,7 +280,7 @@
                   <option value="mute" data-i18n="history.filter.mute">智能禁言</option>
                 </select>
               </label>
-              <button class="button button-warning" id="clear-history" type="button" data-i18n="history.clear.action">清理记录</button>
+              <button class="button button-warning" id="clear-history" type="button" data-i18n="history.clear.action">清理调用记录</button>
             </div>
 
           </div>
@@ -323,7 +323,7 @@
             <button class="button button-quiet" id="history-next" type="button" data-i18n="history.pagination.next">下一页</button>
           </nav>
           <p class="privacy-note" data-i18n="history.privacy">
-            调用记录可包含复读内容、请求内容和生成结果，可在此页展开查看；超过七天的数据由后台定期清理。
+            调用记录可包含复读内容、LLM请求和调用结果，可在此页展开查看；超过七天的数据由后台定期清理。
           </p>
         </section>
       </section>

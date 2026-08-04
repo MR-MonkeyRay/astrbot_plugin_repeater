@@ -99,7 +99,7 @@
 
   function applyTranslations() {
     document.documentElement.lang = bridge?.getLocale?.() || "zh-CN";
-    document.title = translate("title", "Intelligent Copy Test");
+    document.title = translate("title", "Repeater Console");
     document.querySelectorAll("[data-i18n]").forEach((node) => {
       node.textContent = translate(node.dataset.i18n, node.textContent);
     });
@@ -208,7 +208,7 @@
     elements.modeHelp.textContent = manualMode
       ? translate(
         "configuration.mode.manual_help",
-        "Connect directly to an OpenAI-compatible service. Direct generation requires a saved API base URL, API key, and custom model ID.",
+        "Direct LLM calls require a saved API base URL, API key, and custom model ID.",
       )
       : translate(
         "configuration.mode.astrbot_help",
@@ -565,7 +565,7 @@
     button.disabled = true;
     setTestResult(
       result,
-      translate("tests.running", "Generating test copy…"),
+      translate("tests.running", "Running LLM call test…"),
     );
     try {
       const data = await apiPost(`intelligent-console/test/${kind}`, {});

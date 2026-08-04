@@ -56,7 +56,7 @@ class RepeaterSettings:
     interrupt_mute_duration_max: int
     interrupt_mute_texts: tuple[str, ...]
 
-    # 智能文案共用
+    # LLM供应商共用
     intelligent_interrupt_provider_mode: str
     intelligent_interrupt_provider_id: str
     intelligent_interrupt_manual_api_base: str
@@ -232,7 +232,7 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         logger,
     )
 
-    # 智能文案服务
+    # LLM供应商
     intelligent_interrupt_provider_mode = (
         _validated_intelligent_interrupt_provider_mode(
             intelligent_provider_config.get(
@@ -327,7 +327,7 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
 
 
 def normalize_intelligent_interrupt_provider_mode(value: Any) -> str:
-    """将智能文案供应商模式规范化为受支持的值。"""
+    """将LLM供应商模式规范化为受支持的值。"""
     if isinstance(value, str):
         mode = value.strip()
         if mode in {

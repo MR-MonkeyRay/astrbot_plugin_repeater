@@ -57,30 +57,32 @@
 | `mute.duration_min` / `mute.duration_max` | `1` / `15` 秒；各为 `1`–`3600` 秒 | 随机禁言时长的下限和上限。 |
 | `mute.texts` | 预置 5 条 | 静态禁言提示，支持 `{user}` 和 `{time}`；配置项为空时使用内置文案。 |
 
-### 智能文案
+### LLM供应商配置
 
 | 字段 | 默认值 / 范围 | 说明 |
 | --- | --- | --- |
-| `intelligent_provider.mode` | `"astrbot"` | 共享生成服务：`"astrbot"` 或 `"openai_compatible"`。 |
-| `intelligent_provider.provider_id` | `""` | 仅 AstrBot 模式使用；留空且有触发会话时，运行消息会跟随该会话，控制台测试必须选择明确供应商。 |
+| `intelligent_provider.mode` | `"astrbot"` | 共享LLM供应商接入方式：`"astrbot"` 或 `"openai_compatible"`。 |
+| `intelligent_provider.provider_id` | `""` | 仅 AstrBot 模式使用；留空且有触发会话时，运行消息会跟随该会话，LLM调用测试必须选择明确供应商。 |
 | `intelligent_provider.manual_api_base` | `""`；最多 256 字符 | 仅直连模式使用；须为带主机的 `http`/`https` URL，不能含账号、密码、查询串或片段。 |
 | `intelligent_provider.manual_api_key` | `""`；最多 512 字符 | 仅直连模式使用；保存在插件配置中。 |
 | `intelligent_provider.model` | `""` | 直连模式必填；AstrBot 模式可选，用于覆盖供应商模型。 |
 | `intelligent_interrupt.enabled` / `intelligent_mute.enabled` | `false` | 分别启用智能打断和智能禁言提示。 |
 | `intelligent_interrupt.prompt` / `intelligent_mute.prompt` | 内置默认提示词 | 为空或非法值时回退到对应内置提示词。 |
 
-## 智能文案控制台
+## 复读机控制台
 
-在 WebUI 的复读机插件中打开 **智能文案控制台**。
+在 WebUI 的复读机插件中打开 **复读机控制台**。
 
-- 控制台测试不受两个智能功能开关影响，使用固定模拟输入；结果返回当前页面，并在历史存储可用时写入一条 `manual_test` 记录。测试不会发送群消息、调用禁言 API 或修改复读状态。
-- AstrBot 模式下，留空 `provider_id` 的运行消息会跟随触发会话；控制台测试必须先保存明确的供应商。直连模式需要 API Base URL、API Key 和自定义模型 ID；缺项测试会报错且不发起直连请求。
+- LLM调用测试不受两个智能功能开关影响，使用固定模拟输入；结果返回当前页面，并在历史存储可用时写入一条 `manual_test` 记录。测试不会发送群消息、调用禁言 API 或修改复读状态。
+- AstrBot 模式下，留空 `provider_id` 的运行消息会跟随触发会话；LLM调用测试必须先保存明确的供应商。直连模式需要 API Base URL、API Key 和自定义模型 ID；缺项测试会报错且不发起直连请求。
 - API Key 留空保存会保留现有值，填写新值会替换，点击“清除 Key”会删除。插件自身的页面响应、历史字段和日志路径不会主动记录或回显 Key；能访问插件配置的人员仍可读取已保存的 Key。
 - 保存 `intelligent_provider` 成功后会立即更新运行时设置；其他配置按 AstrBot 的插件配置或重载流程生效。
 
 ## 记录与隐私
 
-- 智能记录存于插件数据目录的 `intelligent_history.sqlite3`。存储可用时，运行时会异步记录生成元数据、群和禁言上下文、输入提示与回复；记录写入失败不会阻断消息投递。
+- 调用记录按本地日期存为插件数据目录中的 `intelligent_history-YYYY-MM-DD.jsonl` 文件。存储可用时，运行时会异步记录LLM调用元数据、群和禁言上下文、输入提示与回复；记录写入失败不会阻断消息投递。
 - 记录可能包含群消息和提示中的用户信息；能够访问控制台的人员应视为可读取这些内容。历史字段不保存 API Base URL 或 API Key。
-- 页面默认展示近 24 小时记录，可切换 2、3 或 7 天，按类型筛选、分页或全部清理；这些页面时间范围均为滚动窗口。
+- 页面默认展示近 24 小时调用记录，可切换 2、3 或 7 天，并按类型筛选或分页；这些时间范围均为滚动窗口。
+- 存储可用时，“清理调用记录”会删除插件数据目录中所有当前保留的调用记录，而非仅当前筛选或时间范围内的记录；此操作不可撤销。
+- 存储不可用或记录文件无法读取时，读取和清理会显示失败；修复存储后可重试。
 - 严格早于七天的记录会在初始化和之后每小时的清理任务中删除。

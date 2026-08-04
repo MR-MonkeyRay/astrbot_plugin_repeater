@@ -6,7 +6,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import unittest
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -40,6 +39,7 @@ from repeater_service import (
     RepeaterStateService,
 )
 from intelligent_history import (
+    HistoryStorageError,
     IntelligentActionRecord,
     IntelligentHistoryStore,
     RETENTION_MS,
@@ -102,9 +102,7 @@ class ConfigSchemaTest(unittest.TestCase):
         schema = self._load_schema()
         expected_sliders = {
             ("repeat", "threshold"): ("int", {"min": 3, "max": 50, "step": 1}),
-            ("interrupt", "threshold"): (
-                "int", {"min": 3, "max": 50, "step": 1}
-            ),
+            ("interrupt", "threshold"): ("int", {"min": 3, "max": 50, "step": 1}),
             ("repeat", "probability"): (
                 "float",
                 {"min": 0, "max": 1, "step": 0.01},
@@ -161,7 +159,7 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(provider["provider_id"]["_special"], "select_provider")
         self.assertIn("生产消息跟随触发会话", provider["provider_id"]["hint"])
         self.assertIn(
-            "页面测试必须先选择明确的聊天供应商", provider["provider_id"]["hint"]
+            "LLM调用测试必须先选择明确的聊天供应商", provider["provider_id"]["hint"]
         )
         self.assertEqual(provider["manual_api_base"]["default"], "")
         self.assertIn(
@@ -401,7 +399,6 @@ class ConfigModuleTest(unittest.TestCase):
                 "[repeater] interrupt.threshold 非法(2)，回退为 3",
             ],
         )
-
 
     def test_manual_provider_settings_validate_without_key_echo(self) -> None:
         class RecordingLogger:
@@ -3537,7 +3534,7 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: now,
                 local_timezone=local_timezone,
             )
@@ -3613,59 +3610,22 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(details["repeat_user_count"], 3)
 
-    async def test_initialization_migrates_legacy_history_schema(self) -> None:
+    async def test_daily_files_persist_records_across_restarts(self) -> None:
         now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
         now_ms = int(now.timestamp() * 1000)
+        previous_ms = now_ms - int(timedelta(days=1).total_seconds() * 1000)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "intelligent_history.sqlite3"
-            connection = sqlite3.connect(path)
-            try:
-                connection.execute(
-                    """
-                    CREATE TABLE intelligent_action_history (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        occurred_at_ms INTEGER NOT NULL,
-                        kind TEXT NOT NULL,
-                        source TEXT NOT NULL,
-                        outcome TEXT NOT NULL,
-                        provider_id TEXT,
-                        model TEXT NOT NULL,
-                        group_id TEXT,
-                        mute_duration_seconds INTEGER,
-                        latency_ms INTEGER NOT NULL,
-                        failure_code TEXT
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO intelligent_action_history (
-                        occurred_at_ms, kind, source, outcome, provider_id, model,
-                        group_id, mute_duration_seconds, latency_ms, failure_code
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        now_ms - 1,
-                        "repeat",
-                        "runtime",
-                        "success",
-                        "provider-a",
-                        "model-a",
-                        "group-a",
-                        None,
-                        1,
-                        None,
-                    ),
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-            store = IntelligentHistoryStore(path, clock=lambda: now)
+            data_dir = Path(directory)
+            store = IntelligentHistoryStore(
+                data_dir,
+                clock=lambda: now,
+                local_timezone=timezone.utc,
+            )
             await store.initialize()
-            await store.append(
-                IntelligentActionRecord(
-                    occurred_at_ms=now_ms,
+
+            def record(occurred_at_ms: int) -> IntelligentActionRecord:
+                return IntelligentActionRecord(
+                    occurred_at_ms=occurred_at_ms,
                     kind="repeat",
                     source="runtime",
                     outcome="success",
@@ -3674,37 +3634,117 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
                     group_id="group-a",
                     mute_duration_seconds=None,
                     latency_ms=1,
-                    message_text="repeated message",
+                    message_text="message",
                     prompt="prompt",
-                    completion="reply",
-                    repeat_user_count=2,
+                    completion="completion",
+                    repeat_user_count=3,
                 )
+
+            latest = await store.append(record(now_ms))
+            previous = await store.append(record(previous_ms))
+            latest_path = data_dir / "intelligent_history-2026-08-01.jsonl"
+            previous_path = data_dir / "intelligent_history-2026-07-31.jsonl"
+            self.assertTrue(latest_path.is_file())
+            self.assertTrue(previous_path.is_file())
+            latest_entries = [
+                json.loads(line)
+                for line in latest_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertEqual(latest_entries[0]["id"], latest.id)
+
+            reloaded_store = IntelligentHistoryStore(
+                data_dir,
+                clock=lambda: now,
+                local_timezone=timezone.utc,
             )
-            connection = sqlite3.connect(path)
-            try:
-                columns = {
-                    row[1]
-                    for row in connection.execute(
-                        "PRAGMA table_info(intelligent_action_history)"
-                    )
-                }
-            finally:
-                connection.close()
-            self.assertTrue(
-                {"message_text", "prompt", "completion", "repeat_user_count"} <= columns
+            self.assertEqual(await reloaded_store.initialize(), 0)
+            history = await reloaded_store.query(window="2d", page_size=50)
+            self.assertEqual(
+                [item.occurred_at_ms for item in history.records],
+                [latest.occurred_at_ms, previous.occurred_at_ms],
             )
+
+    async def test_failed_atomic_append_preserves_existing_daily_file(self) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            store = IntelligentHistoryStore(
+                data_dir,
+                clock=lambda: now,
+                local_timezone=timezone.utc,
+            )
+            await store.initialize()
+
+            def record(occurred_at_ms: int) -> IntelligentActionRecord:
+                return IntelligentActionRecord(
+                    occurred_at_ms=occurred_at_ms,
+                    kind="repeat",
+                    source="runtime",
+                    outcome="success",
+                    provider_id="provider-a",
+                    model="model-a",
+                    group_id="group-a",
+                    mute_duration_seconds=None,
+                    latency_ms=1,
+                )
+
+            await store.append(record(now_ms - 1))
+            daily_path = data_dir / "intelligent_history-2026-08-01.jsonl"
+            original_contents = daily_path.read_text(encoding="utf-8")
+            with patch.object(Path, "replace", side_effect=OSError("rename failed")):
+                with self.assertRaises(HistoryStorageError):
+                    await store.append(record(now_ms))
+            self.assertEqual(daily_path.read_text(encoding="utf-8"), original_contents)
+            self.assertFalse((data_dir / f".{daily_path.name}.tmp").exists())
             history = await store.query(window="day", page_size=50)
-            self.assertEqual(history.records[0].message_text, "repeated message")
-            self.assertEqual(history.records[0].prompt, "prompt")
-            self.assertEqual(history.records[0].completion, "reply")
-            self.assertEqual(history.records[0].repeat_user_count, 2)
-            self.assertIsNone(history.records[1].message_text)
+            self.assertEqual(
+                [item.occurred_at_ms for item in history.records],
+                [now_ms - 1],
+            )
+
+    async def test_plugin_initialization_writes_daily_files_to_its_data_directory(
+        self,
+    ) -> None:
+        now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            plugin = MemoryRepeater({}, context=FakePageContext())
+            plugin.name = "history-data-directory-test"
+            with patch(
+                "main.StarTools.get_data_dir",
+                return_value=data_dir,
+            ) as get_data_dir:
+                await plugin.initialize()
+            try:
+                self.assertIsNotNone(plugin.history_store)
+                self.assertEqual(plugin.history_store.data_dir, data_dir)
+                await plugin.history_store.append(
+                    IntelligentActionRecord(
+                        occurred_at_ms=int(now.timestamp() * 1000),
+                        kind="repeat",
+                        source="runtime",
+                        outcome="success",
+                        provider_id="provider-a",
+                        model="model-a",
+                        group_id="group-a",
+                        mute_duration_seconds=None,
+                        latency_ms=1,
+                    )
+                )
+                expected_path = data_dir / (
+                    f"intelligent_history-{now.astimezone().date().isoformat()}.jsonl"
+                )
+                self.assertTrue(expected_path.is_file())
+                get_data_dir.assert_called_once_with("history-data-directory-test")
+            finally:
+                await plugin.terminate()
 
     async def test_initialization_purges_only_strictly_expired_records(self) -> None:
         now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
         now_ms = int(now.timestamp() * 1000)
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "intelligent_history.sqlite3"
+            path = Path(directory)
             initial_store = IntelligentHistoryStore(path, clock=lambda: now)
             await initial_store.initialize()
             cutoff = now_ms - RETENTION_MS
@@ -3729,11 +3769,11 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
                 [item.occurred_at_ms for item in records.records], [cutoff]
             )
 
-    async def test_cancelled_append_waits_for_its_sqlite_worker(self) -> None:
+    async def test_cancelled_append_waits_for_its_filesystem_worker(self) -> None:
         now = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: now,
             )
             await store.initialize()
@@ -3752,7 +3792,9 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
             release = threading.Event()
             original_append = store._append_sync
 
-            def delayed_append(item: IntelligentActionRecord) -> int:
+            def delayed_append(
+                item: IntelligentActionRecord,
+            ) -> IntelligentActionRecord:
                 started.set()
                 if not release.wait(1):
                     raise RuntimeError("append worker was not released")
@@ -3782,7 +3824,7 @@ class IntelligentHistoryStoreTest(unittest.IsolatedAsyncioTestCase):
         now = datetime(2026, 3, 8, 12, tzinfo=timezone.utc)
         with tempfile.TemporaryDirectory() as directory:
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: now,
                 local_timezone=new_york,
             )
@@ -3854,7 +3896,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             plugin = MemoryRepeater({}, config, context=context)
             plugin.history_store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
             )
             await plugin.initialize()
             cleanup_task = plugin._history_cleanup_task
@@ -3943,7 +3985,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             plugin = MemoryRepeater({}, context=FakePageContext())
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: now,
             )
             plugin.history_store = store
@@ -4165,7 +4207,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     context=context,
                 )
                 store = IntelligentHistoryStore(
-                    Path(directory) / "intelligent_history.sqlite3",
+                    Path(directory),
                 )
                 plugin.history_store = store
                 await plugin.initialize()
@@ -4290,7 +4332,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                     context=context,
                 )
                 store = IntelligentHistoryStore(
-                    Path(directory) / "intelligent_history.sqlite3",
+                    Path(directory),
                 )
                 plugin.history_store = store
                 await plugin.initialize()
@@ -4355,7 +4397,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
             )
             plugin.history_store = store
             await plugin.initialize()
@@ -4853,7 +4895,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: datetime.now(timezone.utc),
             )
             plugin.history_store = store
@@ -4922,7 +4964,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: datetime.now(timezone.utc),
             )
             plugin.history_store = store
@@ -4964,7 +5006,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: datetime.now(timezone.utc),
             )
             plugin.history_store = store
@@ -4995,7 +5037,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             plugin = MemoryRepeater({}, context=FakePageContext())
             plugin.history_store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
             )
             await plugin.initialize()
             try:
@@ -5123,7 +5165,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
                 clock=lambda: datetime.now(timezone.utc),
             )
             plugin.history_store = store
@@ -5194,7 +5236,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 context=context,
             )
             store = IntelligentHistoryStore(
-                Path(directory) / "intelligent_history.sqlite3",
+                Path(directory),
             )
             plugin.history_store = store
             await plugin.initialize()
@@ -5349,7 +5391,7 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 await asyncio.gather(*tuple(plugin._history_write_tasks))
             self.assertEqual(trigger.sent, ["智能打断"])
             self.assertTrue(trigger.stopped)
-            self.assertEqual(plugin._history_storage_error, "智能记录存储不可用。")
+            self.assertEqual(plugin._history_storage_error, "调用记录存储不可用。")
         finally:
             await plugin.terminate()
 

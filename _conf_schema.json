@@ -135,7 +135,7 @@
     }
   },
   "intelligent_provider": {
-    "description": "智能文案服务",
+    "description": "LLM供应商",
     "type": "object",
     "hint": "为智能打断和智能禁言提示统一选择 AstrBot 聊天供应商或 OpenAI 兼容直连服务；直连模式须同时保存 API Base URL、API Key 和自定义模型 ID。",
     "items": {
@@ -144,7 +144,7 @@
         "default": "astrbot",
         "options": ["astrbot", "openai_compatible"],
         "labels": ["AstrBot 聊天供应商", "OpenAI 兼容直连"],
-        "description": "生成方式",
+        "description": "供应商接入方式",
         "hint": "选择 AstrBot 已配置聊天供应商，或直接连接 OpenAI 兼容服务；直连模式须同时保存 API Base URL、API Key 和自定义模型 ID。"
       },
       "provider_id": {
@@ -152,7 +152,7 @@
         "default": "",
         "_special": "select_provider",
         "description": "AstrBot 聊天供应商 ID",
-        "hint": "仅 AstrBot 模式使用；留空时生产消息跟随触发会话，页面测试必须先选择明确的聊天供应商。"
+        "hint": "仅 AstrBot 模式使用；留空时生产消息跟随触发会话，LLM调用测试必须先选择明确的聊天供应商。"
       },
       "manual_api_base": {
         "type": "string",
@@ -177,7 +177,7 @@
   "intelligent_interrupt": {
     "description": "智能打断",
     "type": "object",
-    "hint": "命中打断复读时，使用智能文案服务生成主打断文本。",
+    "hint": "命中打断复读时，通过LLM调用生成主打断文本。",
     "items": {
       "enabled": {
         "type": "bool",
@@ -196,7 +196,7 @@
   "intelligent_mute": {
     "description": "智能禁言提示",
     "type": "object",
-    "hint": "禁言成功时，使用智能文案服务生成禁言提示。",
+    "hint": "禁言成功时，通过LLM调用生成禁言提示。",
     "items": {
       "enabled": {
         "type": "bool",

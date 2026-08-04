@@ -141,43 +141,43 @@ class RepeaterPlugin(Star):
             f"{prefix}/config",
             track(self._web_get_intelligent_console_config),
             ["GET"],
-            "读取智能文案测试配置",
+            "读取LLM调用测试配置",
         )
         register_web_api(
             f"{prefix}/models",
             track(self._web_get_intelligent_console_models),
             ["GET"],
-            "读取智能文案模型列表",
+            "读取LLM供应商模型列表",
         )
         register_web_api(
             f"{prefix}/config",
             track(self._web_save_intelligent_console_config),
             ["POST"],
-            "保存智能文案测试配置",
+            "保存LLM调用测试配置",
         )
         register_web_api(
             f"{prefix}/test/repeat",
             track(self._web_test_intelligent_repeat),
             ["POST"],
-            "测试智能打断文案",
+            "执行智能打断LLM调用测试",
         )
         register_web_api(
             f"{prefix}/test/mute",
             track(self._web_test_intelligent_mute),
             ["POST"],
-            "测试智能禁言提示文案",
+            "执行智能禁言提示LLM调用测试",
         )
         register_web_api(
             f"{prefix}/history",
             track(self._web_get_intelligent_history),
             ["GET"],
-            "读取智能文案生成记录",
+            "读取调用记录",
         )
         register_web_api(
             f"{prefix}/history/clear",
             track(self._web_clear_intelligent_history),
             ["POST"],
-            "清理智能文案生成记录",
+            "清理调用记录",
         )
 
     def _track_intelligent_console_handler(self, handler):
@@ -203,19 +203,17 @@ class RepeaterPlugin(Star):
             try:
                 data_dir = StarTools.get_data_dir(plugin_name.strip())
             except Exception:
-                logger.exception("[repeater] 智能记录数据目录不可用")
-                self._history_storage_error = "智能记录存储不可用。"
+                logger.exception("[repeater] 调用记录数据目录不可用")
+                self._history_storage_error = "调用记录存储不可用。"
                 return
-            self.history_store = IntelligentHistoryStore(
-                data_dir / "intelligent_history.sqlite3",
-            )
+            self.history_store = IntelligentHistoryStore(data_dir)
         try:
             await self.history_store.initialize()
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录数据库初始化失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录存储初始化失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
         if self._history_cleanup_task is None or self._history_cleanup_task.done():
@@ -244,12 +242,12 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录清理失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录清理失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
         if deleted:
-            logger.info(f"[repeater] 已清理 {deleted} 条过期智能记录")
+            logger.info(f"[repeater] 已清理 {deleted} 条过期调用记录")
 
     @property
     def _history_available(self) -> bool:
@@ -267,8 +265,8 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录写入失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录写入失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
 
@@ -375,7 +373,7 @@ class RepeaterPlugin(Star):
         """Reject Page requests after the plugin has begun termination."""
         if not self.shutting_down:
             return None
-        return error_response("插件正在停止，智能文案测试暂不可用。", status_code=503)
+        return error_response("插件正在停止，LLM调用测试暂不可用。", status_code=503)
 
     async def _web_get_intelligent_console_config(self):
         """Return saved settings, runtime switches, and available provider choices."""
@@ -460,7 +458,7 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 读取智能文案模型列表失败")
+            logger.exception("[repeater] 读取LLM供应商模型列表失败")
             return error_response(
                 "无法读取模型列表，仍可手动输入自定义模型 ID。",
                 status_code=503,
@@ -688,9 +686,9 @@ class RepeaterPlugin(Star):
             raise
         except Exception as exc:
             logger.warning(
-                f"[repeater] 保存智能文案 Page 配置失败（{type(exc).__name__}）",
+                f"[repeater] 保存LLM供应商配置失败（{type(exc).__name__}）",
             )
-            return error_response("保存智能文案配置失败。", status_code=500)
+            return error_response("保存LLM供应商配置失败。", status_code=500)
         if not committed:
             return error_response(
                 "配置正在被其他操作更新，请刷新后重试。", status_code=409
@@ -751,12 +749,12 @@ class RepeaterPlugin(Star):
             message_text = "这是智能打断测试使用的固定示例消息。"
             prompt = f"被复读的内容：{message_text}"
             system_prompt = settings.intelligent_interrupt_prompt
-            feature_name = "智能打断测试"
+            feature_name = "智能打断LLM调用测试"
         else:
             message_text = None
             prompt = "被禁言用户：测试用户\n禁言时长：60秒"
             system_prompt = settings.intelligent_interrupt_mute_prompt
-            feature_name = "智能禁言提示测试"
+            feature_name = "智能禁言提示LLM调用测试"
         if provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT:
             if not provider_id:
                 result = IntelligentGenerationResult(
@@ -773,7 +771,7 @@ class RepeaterPlugin(Star):
                     prompt=prompt,
                 )
                 return error_response(
-                    "留空供应商会跟随触发会话；页面测试需要先保存一个明确的聊天供应商。",
+                    "留空供应商会跟随触发会话；LLM调用测试需要先保存一个明确的聊天供应商。",
                     status_code=409,
                     data={"code": result.result_code},
                 )
@@ -821,7 +819,7 @@ class RepeaterPlugin(Star):
                     data={"code": result.result_code},
                 )
             return error_response(
-                "智能文案生成失败，请检查供应商和模型配置。",
+                "LLM调用失败，请检查供应商和模型配置。",
                 status_code=502,
                 data={"code": result.result_code},
             )
@@ -846,13 +844,13 @@ class RepeaterPlugin(Star):
         return await self._web_run_intelligent_console_test(kind="mute")
 
     async def _web_get_intelligent_history(self):
-        """Serve bounded, time-windowed metadata-only intelligent history."""
+        """Serve bounded, time-windowed call records."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
         if not self._history_available:
             return error_response(
-                self._history_storage_error or "智能记录存储不可用。",
+                self._history_storage_error or "调用记录存储不可用。",
                 status_code=503,
             )
         raw_window = request.query.get("window", "24h")
@@ -884,18 +882,18 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 读取智能记录失败")
-            return error_response("智能记录存储不可用。", status_code=503)
+            logger.exception("[repeater] 读取调用记录失败")
+            return error_response("调用记录存储不可用。", status_code=503)
         return json_response({"status": "ok", "data": history_page.to_dict()})
 
     async def _web_clear_intelligent_history(self):
-        """Delete all persisted intelligent-generation records."""
+        """Delete all persisted LLM call records."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
         if not self._history_available:
             return error_response(
-                self._history_storage_error or "智能记录存储不可用。",
+                self._history_storage_error or "调用记录存储不可用。",
                 status_code=503,
             )
         try:
@@ -903,8 +901,8 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 清理智能记录失败")
-            return error_response("智能记录存储不可用。", status_code=503)
+            logger.exception("[repeater] 清理调用记录失败")
+            return error_response("调用记录存储不可用。", status_code=503)
         return json_response({"status": "ok", "data": {"deleted": deleted}})
 
     @staticmethod
