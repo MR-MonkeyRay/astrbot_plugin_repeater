@@ -1571,6 +1571,72 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             plugin.state_service.group_states["10001"].repeated_fingerprints,
         )
 
+    async def test_interrupt_mute_allows_owner_bot(self) -> None:
+        bot = FakeBot()
+        plugin = MemoryRepeater(
+            {},
+            {
+                "repeat": {
+                    "threshold": 3,
+                },
+                "interrupt": {
+                    "default_enabled": True,
+                    "probability": 1.0,
+                    "texts": ["打断！"],
+                },
+                "mute": {
+                    "enabled": True,
+                    "probability": 1.0,
+                    "duration_min": 30,
+                    "duration_max": 30,
+                    "texts": ["{user} 被禁言 {time}s"],
+                },
+            },
+        )
+        await plugin.initialize()
+        first = FakeEvent("10007", "A", "复读内容", "1")
+        second = FakeEvent("10007", "B", "复读内容", "2")
+        interrupter = FakeEvent(
+            "10007",
+            "12345",
+            "复读内容",
+            "3",
+            bot=bot,
+            self_id="bot",
+            group_owner="bot",
+            group_admins=[],
+            sender_name="打断者",
+        )
+
+        with (
+            patch("repeater_service.random.random", return_value=0.0),
+            patch("main.random.random", return_value=0.0),
+        ):
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
+            await plugin.on_group_message(interrupter)
+
+        fingerprint = make_fingerprint("复读内容")
+        state = plugin.state_service.group_states["10007"]
+        self.assertEqual(interrupter.sent, ["打断！", "打断者 被禁言 30s"])
+        self.assertEqual(
+            bot.actions,
+            [
+                (
+                    "set_group_ban",
+                    {
+                        "group_id": 10007,
+                        "user_id": 12345,
+                        "duration": 30,
+                        "self_id": "bot",
+                    },
+                ),
+            ],
+        )
+        self.assertTrue(interrupter.stopped)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
+
     async def test_intelligent_interrupt_mute_uses_shared_provider_and_model(
         self,
     ) -> None:
@@ -2029,6 +2095,9 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             "复读内容",
             "3",
             bot=bot,
+            astrbot_admin=True,
+            self_id="bot",
+            group_owner="12345",
             group_admins=[],
         )
 
@@ -2037,8 +2106,14 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
             await plugin.on_group_message(second)
             await plugin.on_group_message(interrupter)
 
+        fingerprint = make_fingerprint("复读内容")
+        state = plugin.state_service.group_states["10002"]
+
         self.assertEqual(interrupter.sent, ["打断！"])
         self.assertEqual(bot.actions, [])
+        self.assertTrue(interrupter.stopped)
+        self.assertIn(fingerprint, state.repeated_fingerprints)
+        self.assertNotIn(fingerprint, state.pending_fingerprints)
 
     async def test_interrupt_preempts_repeat_and_randomly_selects_text(self) -> None:
         plugin = MemoryRepeater(
