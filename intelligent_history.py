@@ -1,10 +1,10 @@
-"""Privacy-preserving persistence for intelligent-generation telemetry."""
+"""Short-lived persistence for intelligent-generation history."""
 
 from __future__ import annotations
 
 import asyncio
-import sqlite3
-from dataclasses import asdict, dataclass
+import json
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Callable, Literal
@@ -27,7 +27,7 @@ class HistoryStorageError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class IntelligentActionRecord:
-    """One content-free intelligent generation attempt."""
+    """One intelligent generation attempt and its displayable details."""
 
     occurred_at_ms: int
     kind: HistoryKind
@@ -39,10 +39,14 @@ class IntelligentActionRecord:
     mute_duration_seconds: int | None
     latency_ms: int
     failure_code: str | None = None
+    message_text: str | None = None
+    prompt: str | None = None
+    completion: str | None = None
+    repeat_user_count: int | None = None
     id: int | None = None
 
     def to_dict(self) -> dict[str, object]:
-        """Return a JSON-serializable record without hidden fields."""
+        """Return a JSON-serializable history record."""
         return asdict(self)
 
 
@@ -85,28 +89,31 @@ class HistoryPage:
 
 
 class IntelligentHistoryStore:
-    """Serialize short-lived SQLite operations for intelligent action telemetry."""
+    """Persist short-lived intelligent action history in daily JSON Lines files."""
 
     _VALID_KINDS = frozenset(("repeat", "mute"))
     _VALID_SOURCES = frozenset(("runtime", "manual_test"))
     _VALID_OUTCOMES = frozenset(("success", "fallback", "failed"))
     _VALID_WINDOWS = frozenset(("day", "24h", "2d", "3d", "7d"))
+    _FILE_PREFIX = "intelligent_history-"
+    _FILE_SUFFIX = ".jsonl"
+    _ID_STRIDE = 1_000_000_000
 
     def __init__(
         self,
-        path: Path | str,
+        data_dir: Path | str,
         *,
         clock: Callable[[], datetime] | None = None,
         local_timezone: tzinfo | None = None,
     ) -> None:
-        self.path = Path(path)
+        self.data_dir = Path(data_dir)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._local_timezone = local_timezone
         self._lock = asyncio.Lock()
         self._initialized = False
 
     async def initialize(self) -> int:
-        """Create the schema and remove strictly expired records."""
+        """Create the data directory and remove strictly expired records."""
         async with self._lock:
             now_ms = self._now_ms()
             deleted = await self._run_sync(self._initialize_sync, now_ms)
@@ -114,24 +121,17 @@ class IntelligentHistoryStore:
             return deleted
 
     async def append(self, record: IntelligentActionRecord) -> IntelligentActionRecord:
-        """Persist one validated metadata-only record."""
+        """Persist one validated history record."""
         self._validate_record(record)
         async with self._lock:
             self._require_initialized()
-            record_id = await self._run_sync(self._append_sync, record)
-        return IntelligentActionRecord(
-            occurred_at_ms=record.occurred_at_ms,
-            kind=record.kind,
-            source=record.source,
-            outcome=record.outcome,
-            provider_id=record.provider_id,
-            model=record.model,
-            group_id=record.group_id,
-            mute_duration_seconds=record.mute_duration_seconds,
-            latency_ms=record.latency_ms,
-            failure_code=record.failure_code,
-            id=record_id,
-        )
+            return await self._run_sync(self._append_sync, record)
+
+    async def clear(self) -> int:
+        """Delete every persisted intelligent action record."""
+        async with self._lock:
+            self._require_initialized()
+            return await self._run_sync(self._clear_sync)
 
     async def query(
         self,
@@ -186,7 +186,7 @@ class IntelligentHistoryStore:
             return await self._run_sync(self._purge_sync, cutoff_at_ms)
 
     async def _run_sync(self, function, *args):
-        """Keep the store lock held until a started SQLite worker has settled."""
+        """Keep the store lock held until a started filesystem worker has settled."""
         worker = asyncio.create_task(asyncio.to_thread(function, *args))
         was_cancelled = False
         while not worker.done():
@@ -258,94 +258,55 @@ class IntelligentHistoryStore:
         instant = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
         return instant.astimezone(display_timezone).isoformat(timespec="seconds")
 
-    def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(str(self.path), timeout=5.0)
+    def _local_datetime(self, timestamp_ms: int) -> datetime:
+        instant = datetime.fromtimestamp(timestamp_ms / 1000, timezone.utc)
+        if self._local_timezone is None:
+            return instant.astimezone()
+        return instant.astimezone(self._local_timezone)
+
+    def _record_path(self, timestamp_ms: int) -> Path:
+        day = self._local_datetime(timestamp_ms).date().isoformat()
+        return self.data_dir / f"{self._FILE_PREFIX}{day}{self._FILE_SUFFIX}"
+
+    def _history_paths(self) -> list[Path]:
+        if not self.data_dir.is_dir():
+            return []
+        return sorted(
+            path
+            for path in self.data_dir.glob(
+                f"{self._FILE_PREFIX}????-??-??{self._FILE_SUFFIX}"
+            )
+            if path.is_file()
+        )
+
+    def _paths_for_range(self, start_at_ms: int, end_at_ms: int) -> list[Path]:
+        day = self._local_datetime(start_at_ms).date()
+        end_day = self._local_datetime(end_at_ms).date()
+        paths: list[Path] = []
+        while day <= end_day:
+            path = self.data_dir / (
+                f"{self._FILE_PREFIX}{day.isoformat()}{self._FILE_SUFFIX}"
+            )
+            if path.is_file():
+                paths.append(path)
+            day += timedelta(days=1)
+        return paths
 
     def _initialize_sync(self, now_ms: int) -> int:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS intelligent_action_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    occurred_at_ms INTEGER NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('repeat', 'mute')),
-                    source TEXT NOT NULL CHECK (source IN ('runtime', 'manual_test')),
-                    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'fallback', 'failed')),
-                    provider_id TEXT,
-                    model TEXT NOT NULL,
-                    group_id TEXT,
-                    mute_duration_seconds INTEGER,
-                    latency_ms INTEGER NOT NULL,
-                    failure_code TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_intelligent_action_history_occurred
-                ON intelligent_action_history (occurred_at_ms DESC, id DESC)
-                """
-            )
-            connection.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_intelligent_action_history_kind_occurred
-                ON intelligent_action_history (kind, occurred_at_ms DESC, id DESC)
-                """
-            )
-            cursor = connection.execute(
-                "DELETE FROM intelligent_action_history WHERE occurred_at_ms < ?",
-                (now_ms - RETENTION_MS,),
-            )
-            connection.commit()
-            return cursor.rowcount
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        return self._purge_sync(now_ms - RETENTION_MS)
 
-    def _append_sync(self, record: IntelligentActionRecord) -> int:
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                """
-                INSERT INTO intelligent_action_history (
-                    occurred_at_ms,
-                    kind,
-                    source,
-                    outcome,
-                    provider_id,
-                    model,
-                    group_id,
-                    mute_duration_seconds,
-                    latency_ms,
-                    failure_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    record.occurred_at_ms,
-                    record.kind,
-                    record.source,
-                    record.outcome,
-                    record.provider_id,
-                    record.model,
-                    record.group_id,
-                    record.mute_duration_seconds,
-                    record.latency_ms,
-                    record.failure_code,
-                ),
-            )
-            connection.commit()
-            return int(cursor.lastrowid)
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+    def _append_sync(self, record: IntelligentActionRecord) -> IntelligentActionRecord:
+        path = self._record_path(record.occurred_at_ms)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        existing = self._read_records_sync(path) if path.exists() else []
+        persisted = replace(
+            record,
+            id=self._next_record_id(record.occurred_at_ms, existing),
+        )
+        existing.append(persisted)
+        self._rewrite_records_sync(path, existing)
+        return persisted
 
     def _query_sync(
         self,
@@ -355,98 +316,148 @@ class IntelligentHistoryStore:
         page: int,
         page_size: int,
     ) -> tuple[dict[str, int], list[IntelligentActionRecord]]:
-        conditions = ["occurred_at_ms >= ?", "occurred_at_ms <= ?"]
-        params: list[object] = [start_at_ms, end_at_ms]
-        if kind is not None:
-            conditions.append("kind = ?")
-            params.append(kind)
-        where_clause = " AND ".join(conditions)
-        connection = self._connect()
-        try:
-            summary_row = connection.execute(
-                f"""
-                SELECT
-                    COUNT(*) AS total,
-                    COALESCE(SUM(CASE WHEN kind = 'repeat' THEN 1 ELSE 0 END), 0)
-                        AS repeat,
-                    COALESCE(SUM(CASE WHEN kind = 'mute' THEN 1 ELSE 0 END), 0)
-                        AS mute,
-                    COALESCE(SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END), 0)
-                        AS success,
-                    COALESCE(SUM(CASE WHEN outcome = 'fallback' THEN 1 ELSE 0 END), 0)
-                        AS fallback,
-                    COALESCE(SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END), 0)
-                        AS failed
-                FROM intelligent_action_history
-                WHERE {where_clause}
-                """,
-                params,
-            ).fetchone()
-            offset = (page - 1) * page_size
-            rows = connection.execute(
-                f"""
-                SELECT
-                    id,
-                    occurred_at_ms,
-                    kind,
-                    source,
-                    outcome,
-                    provider_id,
-                    model,
-                    group_id,
-                    mute_duration_seconds,
-                    latency_ms,
-                    failure_code
-                FROM intelligent_action_history
-                WHERE {where_clause}
-                ORDER BY occurred_at_ms DESC, id DESC
-                LIMIT ? OFFSET ?
-                """,
-                [*params, page_size, offset],
-            ).fetchall()
-        finally:
-            connection.close()
         summary = {
-            "total": int(summary_row[0]),
-            "repeat": int(summary_row[1]),
-            "mute": int(summary_row[2]),
-            "success": int(summary_row[3]),
-            "fallback": int(summary_row[4]),
-            "failed": int(summary_row[5]),
+            "total": 0,
+            "repeat": 0,
+            "mute": 0,
+            "success": 0,
+            "fallback": 0,
+            "failed": 0,
         }
-        records = [
-            IntelligentActionRecord(
-                id=int(row[0]),
-                occurred_at_ms=int(row[1]),
-                kind=row[2],
-                source=row[3],
-                outcome=row[4],
-                provider_id=row[5],
-                model=row[6],
-                group_id=row[7],
-                mute_duration_seconds=row[8],
-                latency_ms=int(row[9]),
-                failure_code=row[10],
-            )
-            for row in rows
-        ]
-        return summary, records
+        matching: list[IntelligentActionRecord] = []
+        for path in self._paths_for_range(start_at_ms, end_at_ms):
+            for record in self._read_records_sync(path):
+                if not start_at_ms <= record.occurred_at_ms <= end_at_ms:
+                    continue
+                if kind is not None and record.kind != kind:
+                    continue
+                summary["total"] += 1
+                summary[record.kind] += 1
+                summary[record.outcome] += 1
+                matching.append(record)
+        matching.sort(
+            key=lambda record: (record.occurred_at_ms, record.id or 0),
+            reverse=True,
+        )
+        offset = (page - 1) * page_size
+        return summary, matching[offset : offset + page_size]
+
+    def _clear_sync(self) -> int:
+        deleted = 0
+        for path in self._history_paths():
+            deleted += len(self._read_records_sync(path))
+            self._delete_file_sync(path)
+        return deleted
 
     def _purge_sync(self, cutoff_at_ms: int) -> int:
-        connection = self._connect()
+        deleted = 0
+        for path in self._history_paths():
+            records = self._read_records_sync(path)
+            retained = [
+                record for record in records if record.occurred_at_ms >= cutoff_at_ms
+            ]
+            deleted += len(records) - len(retained)
+            if not retained:
+                self._delete_file_sync(path)
+            elif len(retained) != len(records):
+                self._rewrite_records_sync(path, retained)
+        return deleted
+
+    def _read_records_sync(self, path: Path) -> list[IntelligentActionRecord]:
+        records: list[IntelligentActionRecord] = []
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            cursor = connection.execute(
-                "DELETE FROM intelligent_action_history WHERE occurred_at_ms < ?",
-                (cutoff_at_ms,),
-            )
-            connection.commit()
-            return cursor.rowcount
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+            with path.open(encoding="utf-8") as source:
+                for line_number, line in enumerate(source, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = self._record_from_dict(json.loads(line))
+                        self._validate_record(record)
+                    except (
+                        json.JSONDecodeError,
+                        KeyError,
+                        TypeError,
+                        ValueError,
+                    ) as exc:
+                        raise HistoryStorageError(
+                            f"invalid history record in {path.name} line {line_number}"
+                        ) from exc
+                    records.append(record)
+        except UnicodeError as exc:
+            raise HistoryStorageError(f"unable to decode {path.name}") from exc
+        except OSError as exc:
+            raise HistoryStorageError(f"unable to read {path.name}") from exc
+        return records
+
+    @staticmethod
+    def _record_from_dict(payload: object) -> IntelligentActionRecord:
+        if not isinstance(payload, dict):
+            raise ValueError("history record must be a JSON object")
+        return IntelligentActionRecord(
+            occurred_at_ms=payload["occurred_at_ms"],
+            kind=payload["kind"],
+            source=payload["source"],
+            outcome=payload["outcome"],
+            provider_id=payload.get("provider_id"),
+            model=payload["model"],
+            group_id=payload.get("group_id"),
+            mute_duration_seconds=payload.get("mute_duration_seconds"),
+            latency_ms=payload["latency_ms"],
+            failure_code=payload.get("failure_code"),
+            message_text=payload.get("message_text"),
+            prompt=payload.get("prompt"),
+            completion=payload.get("completion"),
+            repeat_user_count=payload.get("repeat_user_count"),
+            id=payload.get("id"),
+        )
+
+    @staticmethod
+    def _serialize_record(record: IntelligentActionRecord) -> str:
+        return json.dumps(
+            record.to_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _next_record_id(
+        self,
+        occurred_at_ms: int,
+        existing: list[IntelligentActionRecord],
+    ) -> int:
+        base = self._local_datetime(occurred_at_ms).date().toordinal()
+        next_id = base * self._ID_STRIDE + len(existing) + 1
+        for record in existing:
+            if record.id is not None:
+                next_id = max(next_id, record.id + 1)
+        return next_id
+
+    def _rewrite_records_sync(
+        self,
+        path: Path,
+        records: list[IntelligentActionRecord],
+    ) -> None:
+        temporary_path = path.with_name(f".{path.name}.tmp")
+        try:
+            with temporary_path.open("w", encoding="utf-8") as output:
+                for record in records:
+                    output.write(self._serialize_record(record))
+                    output.write("\n")
+            temporary_path.replace(path)
+        except OSError as exc:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise HistoryStorageError(f"unable to rewrite {path.name}") from exc
+
+    @staticmethod
+    def _delete_file_sync(path: Path) -> None:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise HistoryStorageError(f"unable to delete {path.name}") from exc
 
     def _require_initialized(self) -> None:
         if not self._initialized:
@@ -463,7 +474,9 @@ class IntelligentHistoryStore:
             record.occurred_at_ms, bool
         ):
             raise ValueError("occurred_at_ms must be an integer")
-        if not isinstance(record.latency_ms, int) or isinstance(record.latency_ms, bool):
+        if not isinstance(record.latency_ms, int) or isinstance(
+            record.latency_ms, bool
+        ):
             raise ValueError("latency_ms must be an integer")
         if record.latency_ms < 0:
             raise ValueError("latency_ms must not be negative")
@@ -483,6 +496,26 @@ class IntelligentHistoryStore:
                 raise ValueError("mute_duration_seconds must not be negative")
         if record.failure_code is not None and not isinstance(record.failure_code, str):
             raise ValueError("failure_code must be a string or None")
+        for field_name, value in (
+            ("message_text", record.message_text),
+            ("prompt", record.prompt),
+            ("completion", record.completion),
+        ):
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"{field_name} must be a string or None")
+        if record.repeat_user_count is not None:
+            if not isinstance(record.repeat_user_count, int) or isinstance(
+                record.repeat_user_count,
+                bool,
+            ):
+                raise ValueError("repeat_user_count must be an integer or None")
+            if record.repeat_user_count < 0:
+                raise ValueError("repeat_user_count must not be negative")
+        if record.id is not None:
+            if not isinstance(record.id, int) or isinstance(record.id, bool):
+                raise ValueError("id must be an integer or None")
+            if record.id < 1:
+                raise ValueError("id must be positive")
 
     def _validate_query(
         self,

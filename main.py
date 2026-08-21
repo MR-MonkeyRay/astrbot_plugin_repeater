@@ -22,12 +22,34 @@ if __package__:
         IntelligentActionRecord,
         IntelligentHistoryStore,
     )
-    from .repeater_config import RepeaterSettings, build_settings
+    from .repeater_config import (
+        INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH,
+        INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH,
+        CONFIG_SECTION_INTELLIGENT_PROVIDER,
+        INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+        INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE,
+        RepeaterSettings,
+        build_settings,
+        normalize_intelligent_interrupt_manual_api_base,
+        normalize_intelligent_interrupt_manual_api_key,
+        normalize_intelligent_interrupt_provider_mode,
+    )
     from .repeater_messages import RepeatableMessage, repeatable_message
     from .repeater_service import RepeatAttempt, RepeaterStateService
 else:
     from intelligent_history import IntelligentActionRecord, IntelligentHistoryStore
-    from repeater_config import RepeaterSettings, build_settings
+    from repeater_config import (
+        INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH,
+        INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH,
+        CONFIG_SECTION_INTELLIGENT_PROVIDER,
+        INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+        INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE,
+        RepeaterSettings,
+        build_settings,
+        normalize_intelligent_interrupt_manual_api_base,
+        normalize_intelligent_interrupt_manual_api_key,
+        normalize_intelligent_interrupt_provider_mode,
+    )
     from repeater_messages import RepeatableMessage, repeatable_message
     from repeater_service import RepeatAttempt, RepeaterStateService
 
@@ -39,8 +61,9 @@ PERMISSION_ERROR = (
 
 PLUGIN_NAME = "astrbot_plugin_repeater"
 HISTORY_CLEANUP_INTERVAL_SECONDS = 60 * 60
-MAX_CONFIG_TEXT_LENGTH = 256
+MAX_CONFIG_TEXT_LENGTH = INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH
 MAX_HISTORY_PAGE = 10_000
+MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID = "manual-openai-compatible"
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,37 +141,43 @@ class RepeaterPlugin(Star):
             f"{prefix}/config",
             track(self._web_get_intelligent_console_config),
             ["GET"],
-            "读取智能文案测试配置",
+            "读取LLM调用测试配置",
         )
         register_web_api(
             f"{prefix}/models",
             track(self._web_get_intelligent_console_models),
             ["GET"],
-            "读取智能文案模型列表",
+            "读取LLM供应商模型列表",
         )
         register_web_api(
             f"{prefix}/config",
             track(self._web_save_intelligent_console_config),
             ["POST"],
-            "保存智能文案测试配置",
+            "保存LLM调用测试配置",
         )
         register_web_api(
             f"{prefix}/test/repeat",
             track(self._web_test_intelligent_repeat),
             ["POST"],
-            "测试智能打断文案",
+            "执行智能打断LLM调用测试",
         )
         register_web_api(
             f"{prefix}/test/mute",
             track(self._web_test_intelligent_mute),
             ["POST"],
-            "测试智能禁言提示文案",
+            "执行智能禁言提示LLM调用测试",
         )
         register_web_api(
             f"{prefix}/history",
             track(self._web_get_intelligent_history),
             ["GET"],
-            "读取智能文案生成记录",
+            "读取调用记录",
+        )
+        register_web_api(
+            f"{prefix}/history/clear",
+            track(self._web_clear_intelligent_history),
+            ["POST"],
+            "清理调用记录",
         )
 
     def _track_intelligent_console_handler(self, handler):
@@ -174,19 +203,17 @@ class RepeaterPlugin(Star):
             try:
                 data_dir = StarTools.get_data_dir(plugin_name.strip())
             except Exception:
-                logger.exception("[repeater] 智能记录数据目录不可用")
-                self._history_storage_error = "智能记录存储不可用。"
+                logger.exception("[repeater] 调用记录数据目录不可用")
+                self._history_storage_error = "调用记录存储不可用。"
                 return
-            self.history_store = IntelligentHistoryStore(
-                data_dir / "intelligent_history.sqlite3",
-            )
+            self.history_store = IntelligentHistoryStore(data_dir)
         try:
             await self.history_store.initialize()
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录数据库初始化失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录存储初始化失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
         if self._history_cleanup_task is None or self._history_cleanup_task.done():
@@ -215,12 +242,12 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录清理失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录清理失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
         if deleted:
-            logger.info(f"[repeater] 已清理 {deleted} 条过期智能记录")
+            logger.info(f"[repeater] 已清理 {deleted} 条过期调用记录")
 
     @property
     def _history_available(self) -> bool:
@@ -238,8 +265,8 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 智能记录写入失败")
-            self._history_storage_error = "智能记录存储不可用。"
+            logger.exception("[repeater] 调用记录写入失败")
+            self._history_storage_error = "调用记录存储不可用。"
             return
         self._history_storage_error = None
 
@@ -287,8 +314,11 @@ class RepeaterPlugin(Star):
                 providers = await providers
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("[repeater] 读取聊天供应商列表失败")
+        except Exception as exc:
+            logger.warning(
+                "[repeater] chat provider catalog lookup failed ("
+                f"{type(exc).__name__})",
+            )
             return [], {}, False
         if not isinstance(providers, (list, tuple)):
             return [], {}, False
@@ -312,9 +342,7 @@ class RepeaterPlugin(Star):
                     "id": normalized_id,
                     "label": normalized_id,
                     "current_model": (
-                        current_model.strip()
-                        if isinstance(current_model, str)
-                        else ""
+                        current_model.strip() if isinstance(current_model, str) else ""
                     ),
                 },
             )
@@ -328,9 +356,7 @@ class RepeaterPlugin(Star):
             raise ValueError(f"{field_name} 必须是字符串")
         normalized = value.strip()
         if len(normalized) > MAX_CONFIG_TEXT_LENGTH:
-            raise ValueError(
-                f"{field_name} 不能超过 {MAX_CONFIG_TEXT_LENGTH} 个字符"
-            )
+            raise ValueError(f"{field_name} 不能超过 {MAX_CONFIG_TEXT_LENGTH} 个字符")
         return normalized
 
     @staticmethod
@@ -347,24 +373,43 @@ class RepeaterPlugin(Star):
         """Reject Page requests after the plugin has begun termination."""
         if not self.shutting_down:
             return None
-        return error_response("插件正在停止，智能文案测试暂不可用。", status_code=503)
+        return error_response("插件正在停止，LLM调用测试暂不可用。", status_code=503)
 
     async def _web_get_intelligent_console_config(self):
         """Return saved settings, runtime switches, and available provider choices."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
-        options, provider_by_id, catalog_available = await self._chat_provider_catalog()
         settings = self.state_service.settings
+        provider_mode = settings.intelligent_interrupt_provider_mode
         provider_id = settings.intelligent_interrupt_provider_id
+        load_provider_catalog = (
+            provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT
+            or request.query.get("include_provider_catalog") == "1"
+        )
+        if load_provider_catalog:
+            (
+                options,
+                provider_by_id,
+                catalog_available,
+            ) = await self._chat_provider_catalog()
+        else:
+            options, provider_by_id, catalog_available = [], {}, False
         return json_response(
             {
                 "status": "ok",
                 "data": {
+                    "provider_mode": provider_mode,
                     "provider_id": provider_id,
                     "model": settings.intelligent_interrupt_model,
+                    "manual_api_base": settings.intelligent_interrupt_manual_api_base,
+                    "manual_api_key_configured": bool(
+                        settings.intelligent_interrupt_manual_api_key,
+                    ),
                     "provider_exists": (
-                        not provider_id
+                        provider_mode
+                        == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+                        or not provider_id
                         or (catalog_available and provider_id in provider_by_id)
                     ),
                     "provider_catalog_available": catalog_available,
@@ -413,14 +458,14 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 读取智能文案模型列表失败")
+            logger.exception("[repeater] 读取LLM供应商模型列表失败")
             return error_response(
-                "无法读取模型列表，仍可手动输入模型 ID。",
+                "无法读取模型列表，仍可手动输入自定义模型 ID。",
                 status_code=503,
             )
         if not isinstance(models, (list, tuple, set)):
             return error_response(
-                "模型列表格式无效，仍可手动输入模型 ID。",
+                "模型列表格式无效，仍可手动输入自定义模型 ID。",
                 status_code=503,
             )
         model_ids = {
@@ -454,7 +499,7 @@ class RepeaterPlugin(Star):
     @staticmethod
     def _save_astrbot_config_snapshot(
         config: Any,
-        updates: dict[str, str],
+        updates: dict[str, Any],
     ) -> tuple[bool, dict[str, Any]]:
         """Write one AstrBotConfig snapshot without exposing a revision race."""
         state_lock = config._save_state_lock
@@ -492,13 +537,26 @@ class RepeaterPlugin(Star):
         *,
         provider_id: str,
         model: str,
+        provider_mode: str = INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+        manual_api_base: str = "",
+        manual_api_key: str | None = None,
     ) -> bool:
-        """Persist the shared pair and publish its committed snapshot."""
-        updates = {
-            "intelligent_interrupt_provider_id": provider_id,
-            "intelligent_interrupt_model": model,
-        }
+        """Atomically persist shared intelligent-text provider settings."""
         async with self.state_service.save_lock:
+            effective_manual_api_key = (
+                self.state_service.settings.intelligent_interrupt_manual_api_key
+                if manual_api_key is None
+                else manual_api_key
+            )
+            updates = {
+                CONFIG_SECTION_INTELLIGENT_PROVIDER: {
+                    "mode": provider_mode,
+                    "provider_id": provider_id,
+                    "manual_api_base": manual_api_base,
+                    "manual_api_key": effective_manual_api_key,
+                    "model": model,
+                },
+            }
             state_lock = getattr(self.config, "_save_state_lock", None)
             write_snapshot = getattr(self.config, "_write_config_snapshot", None)
             if (
@@ -506,14 +564,15 @@ class RepeaterPlugin(Star):
                 and hasattr(state_lock, "__enter__")
                 and hasattr(state_lock, "__exit__")
             ):
-                (committed, snapshot), was_cancelled = (
-                    await self._await_settled_config_save(
-                        asyncio.to_thread(
-                            self._save_astrbot_config_snapshot,
-                            self.config,
-                            updates,
-                        ),
-                    )
+                (
+                    (committed, snapshot),
+                    was_cancelled,
+                ) = await self._await_settled_config_save(
+                    asyncio.to_thread(
+                        self._save_astrbot_config_snapshot,
+                        self.config,
+                        updates,
+                    ),
                 )
                 if committed:
                     settings = build_settings(snapshot, logger)
@@ -527,10 +586,8 @@ class RepeaterPlugin(Star):
             save_config_async = getattr(self.config, "save_config_async", None)
             try:
                 if callable(save_config_async):
-                    save_result, was_cancelled = (
-                        await self._await_settled_config_save(
-                            save_config_async(updates),
-                        )
+                    save_result, was_cancelled = await self._await_settled_config_save(
+                        save_config_async(updates),
                     )
                     if save_result is False:
                         self.config.clear()
@@ -558,7 +615,7 @@ class RepeaterPlugin(Star):
         return True
 
     async def _web_save_intelligent_console_config(self):
-        """Validate and persist the Page's shared provider/model selection."""
+        """Validate and persist the Page's shared provider settings."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
@@ -566,14 +623,52 @@ class RepeaterPlugin(Star):
         if not isinstance(body, dict):
             return error_response("请求体必须是 JSON 对象。")
         try:
+            raw_provider_mode = body.get(
+                "provider_mode",
+                INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT,
+            )
+            if not isinstance(raw_provider_mode, str):
+                raise ValueError(
+                    "provider_mode 必须是 astrbot 或 openai_compatible",
+                )
+            provider_mode = normalize_intelligent_interrupt_provider_mode(
+                raw_provider_mode,
+            )
+            if raw_provider_mode.strip() != provider_mode:
+                raise ValueError(
+                    "provider_mode 必须是 astrbot 或 openai_compatible",
+                )
             provider_id = self._normalize_page_text(
                 body.get("provider_id", ""),
                 "provider_id",
             )
             model = self._normalize_page_text(body.get("model", ""), "model")
+            manual_api_base = normalize_intelligent_interrupt_manual_api_base(
+                body.get("manual_api_base", ""),
+            )
+            if manual_api_base is None:
+                raise ValueError(
+                    "manual_api_base 必须是长度不超过 "
+                    f"{INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH} 个字符的 "
+                    "有效 http 或 https URL，且不能包含账号、密码、查询串或片段",
+                )
+            manual_api_key: str | None = None
+            if (
+                provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+                and "manual_api_key" in body
+            ):
+                manual_api_key = normalize_intelligent_interrupt_manual_api_key(
+                    body["manual_api_key"],
+                )
+                if manual_api_key is None:
+                    raise ValueError(
+                        "manual_api_key 必须是长度不超过 "
+                        f"{INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH} "
+                        "个字符的字符串",
+                    )
         except ValueError as exc:
             return error_response(str(exc))
-        if provider_id:
+        if provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT and provider_id:
             _, provider_by_id, catalog_available = await self._chat_provider_catalog()
             if not catalog_available:
                 return error_response("聊天供应商列表暂不可用。", status_code=503)
@@ -583,18 +678,34 @@ class RepeaterPlugin(Star):
             committed = await self._save_intelligent_console_config(
                 provider_id=provider_id,
                 model=model,
+                provider_mode=provider_mode,
+                manual_api_base=manual_api_base,
+                manual_api_key=manual_api_key,
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("[repeater] 保存智能文案 Page 配置失败")
-            return error_response("保存智能文案配置失败。", status_code=500)
+        except Exception as exc:
+            logger.warning(
+                f"[repeater] 保存LLM供应商配置失败（{type(exc).__name__}）",
+            )
+            return error_response("保存LLM供应商配置失败。", status_code=500)
         if not committed:
-            return error_response("配置正在被其他操作更新，请刷新后重试。", status_code=409)
+            return error_response(
+                "配置正在被其他操作更新，请刷新后重试。", status_code=409
+            )
+        saved_settings = self.state_service.settings
         return json_response(
             {
                 "status": "ok",
-                "data": {"provider_id": provider_id, "model": model},
+                "data": {
+                    "provider_mode": provider_mode,
+                    "provider_id": provider_id,
+                    "manual_api_base": manual_api_base,
+                    "model": model,
+                    "manual_api_key_configured": bool(
+                        saved_settings.intelligent_interrupt_manual_api_key,
+                    ),
+                },
             },
         )
 
@@ -603,6 +714,8 @@ class RepeaterPlugin(Star):
         *,
         kind: Literal["repeat", "mute"],
         result: IntelligentGenerationResult,
+        message_text: str | None = None,
+        prompt: str | None = None,
     ) -> None:
         """Synchronously retain a Page test so an immediate history refresh sees it."""
         outcome: Literal["success", "fallback", "failed"] = (
@@ -614,6 +727,8 @@ class RepeaterPlugin(Star):
                 kind=kind,
                 source="manual_test",
                 outcome=outcome,
+                message_text=message_text,
+                prompt=prompt,
             ),
         )
 
@@ -622,62 +737,89 @@ class RepeaterPlugin(Star):
         *,
         kind: Literal["repeat", "mute"],
     ):
-        """Run a fixed, non-destructive generation test for one intelligent feature."""
+        """Run a fixed generation test without group side effects."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
         settings = self.state_service.settings
+        provider_mode = settings.intelligent_interrupt_provider_mode
         provider_id = settings.intelligent_interrupt_provider_id
         model = settings.intelligent_interrupt_model
-        if not provider_id:
-            result = IntelligentGenerationResult(
-                completion=None,
-                provider_id=None,
-                model=model,
-                latency_ms=0,
-                result_code="provider_resolution_failed",
-            )
-            await self._record_manual_generation(kind=kind, result=result)
-            return error_response(
-                "留空供应商会跟随触发会话；页面测试需要先保存一个明确的聊天供应商。",
-                status_code=409,
-                data={"code": result.result_code},
-            )
-        _, provider_by_id, catalog_available = await self._chat_provider_catalog()
-        if not catalog_available or provider_id not in provider_by_id:
-            result = IntelligentGenerationResult(
-                completion=None,
-                provider_id=provider_id if catalog_available else None,
-                model=model,
-                latency_ms=0,
-                result_code="provider_resolution_failed",
-            )
-            await self._record_manual_generation(kind=kind, result=result)
-            return error_response(
-                "保存的聊天供应商当前不可用，请重新选择后保存。",
-                status_code=409 if catalog_available else 503,
-                data={"code": result.result_code},
-            )
         if kind == "repeat":
-            prompt = "被复读的内容：这是智能打断测试使用的固定示例消息。"
+            message_text = "这是智能打断测试使用的固定示例消息。"
+            prompt = f"被复读的内容：{message_text}"
             system_prompt = settings.intelligent_interrupt_prompt
-            feature_name = "智能打断测试"
+            feature_name = "智能打断LLM调用测试"
         else:
+            message_text = None
             prompt = "被禁言用户：测试用户\n禁言时长：60秒"
             system_prompt = settings.intelligent_interrupt_mute_prompt
-            feature_name = "智能禁言提示测试"
+            feature_name = "智能禁言提示LLM调用测试"
+        if provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT:
+            if not provider_id:
+                result = IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=None,
+                    model=model,
+                    latency_ms=0,
+                    result_code="provider_resolution_failed",
+                )
+                await self._record_manual_generation(
+                    kind=kind,
+                    result=result,
+                    message_text=message_text,
+                    prompt=prompt,
+                )
+                return error_response(
+                    "留空供应商会跟随触发会话；LLM调用测试需要先保存一个明确的聊天供应商。",
+                    status_code=409,
+                    data={"code": result.result_code},
+                )
+            _, provider_by_id, catalog_available = await self._chat_provider_catalog()
+            if not catalog_available or provider_id not in provider_by_id:
+                result = IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=provider_id if catalog_available else None,
+                    model=model,
+                    latency_ms=0,
+                    result_code="provider_resolution_failed",
+                )
+                await self._record_manual_generation(
+                    kind=kind,
+                    result=result,
+                    message_text=message_text,
+                    prompt=prompt,
+                )
+                return error_response(
+                    "保存的聊天供应商当前不可用，请重新选择后保存。",
+                    status_code=409 if catalog_available else 503,
+                    data={"code": result.result_code},
+                )
         result = await self._run_intelligent_generation(
             prompt=prompt,
             system_prompt=system_prompt,
-            provider_id=provider_id,
-            model=model,
+            settings=settings,
             unified_msg_origin=None,
             feature_name=feature_name,
         )
-        await self._record_manual_generation(kind=kind, result=result)
+        await self._record_manual_generation(
+            kind=kind,
+            result=result,
+            message_text=message_text,
+            prompt=prompt,
+        )
         if result.result_code != "success":
+            if (
+                provider_mode == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+                and result.result_code == "provider_resolution_failed"
+            ):
+                return error_response(
+                    "OpenAI 兼容直连模式需要已保存的 API Base URL、API Key 和自定义模型 ID。",
+                    status_code=409,
+                    data={"code": result.result_code},
+                )
             return error_response(
-                "智能文案生成失败，请检查供应商和模型配置。",
+                "LLM调用失败，请检查供应商和模型配置。",
                 status_code=502,
                 data={"code": result.result_code},
             )
@@ -702,16 +844,17 @@ class RepeaterPlugin(Star):
         return await self._web_run_intelligent_console_test(kind="mute")
 
     async def _web_get_intelligent_history(self):
-        """Serve bounded, time-windowed metadata-only intelligent history."""
+        """Serve bounded, time-windowed call records."""
         shutdown_response = self._intelligent_console_shutdown_response()
         if shutdown_response is not None:
             return shutdown_response
         if not self._history_available:
             return error_response(
-                self._history_storage_error or "智能记录存储不可用。",
+                self._history_storage_error or "调用记录存储不可用。",
                 status_code=503,
             )
-        raw_window = request.query.get("window", "day")
+        raw_window = request.query.get("window", "24h")
+
         raw_kind = request.query.get("kind", "all")
         try:
             if raw_window not in {"day", "24h", "2d", "3d", "7d"}:
@@ -739,9 +882,28 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception:
-            logger.exception("[repeater] 读取智能记录失败")
-            return error_response("智能记录存储不可用。", status_code=503)
+            logger.exception("[repeater] 读取调用记录失败")
+            return error_response("调用记录存储不可用。", status_code=503)
         return json_response({"status": "ok", "data": history_page.to_dict()})
+
+    async def _web_clear_intelligent_history(self):
+        """Delete all persisted LLM call records."""
+        shutdown_response = self._intelligent_console_shutdown_response()
+        if shutdown_response is not None:
+            return shutdown_response
+        if not self._history_available:
+            return error_response(
+                self._history_storage_error or "调用记录存储不可用。",
+                status_code=503,
+            )
+        try:
+            deleted = await self.history_store.clear()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[repeater] 清理调用记录失败")
+            return error_response("调用记录存储不可用。", status_code=503)
+        return json_response({"status": "ok", "data": {"deleted": deleted}})
 
     @staticmethod
     def _group_key(event: AstrMessageEvent) -> str:
@@ -875,16 +1037,14 @@ class RepeaterPlugin(Star):
 
         response_text = attempt.response_text
         settings = self.state_service.settings
-        if (
-            attempt.interrupted
-            and settings.intelligent_interrupt_enabled
-        ):
+        if attempt.interrupted and settings.intelligent_interrupt_enabled:
             try:
                 response_text = await self._generate_intelligent_interrupt(
                     event,
                     message,
                     attempt.response_text,
                     settings=settings,
+                    repeat_user_count=attempt.repeat_user_count,
                 )
             except asyncio.CancelledError:
                 try:
@@ -934,22 +1094,142 @@ class RepeaterPlugin(Star):
             f"[repeater] {group_key} 触发{action}: {response_text[:20]}",
         )
         if attempt.interrupted:
-            await self._handle_interrupt_mute(event, group_key, attempt)
+            await self._handle_interrupt_mute(event, group_key, attempt, message)
+
+    async def _request_manual_openai_compatible_completion(
+        self,
+        *,
+        api_base: str,
+        api_key: str,
+        model: str,
+        system_prompt: str,
+        prompt: str,
+    ) -> str | None:
+        """Request one non-streaming OpenAI-compatible chat completion."""
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=api_base,
+            timeout=120,
+            max_retries=0,
+        )
+        request_error: BaseException | None = None
+        try:
+            response = await client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+            )
+            choices = getattr(response, "choices", None)
+            if not isinstance(choices, (list, tuple)) or not choices:
+                return None
+            message = getattr(choices[0], "message", None)
+            if getattr(message, "role", None) != "assistant":
+                return None
+            content = getattr(message, "content", None)
+            if not isinstance(content, str):
+                return None
+            completion = content.strip()
+            if not completion:
+                return None
+            if api_key in completion:
+                logger.warning(
+                    "[repeater] manual OpenAI-compatible response contained API key",
+                )
+                return None
+            return completion
+        except BaseException as exc:
+            request_error = exc
+            raise
+        finally:
+            try:
+                await client.close()
+            except asyncio.CancelledError:
+                if request_error is None:
+                    raise
+                logger.warning(
+                    "[repeater] manual OpenAI-compatible client close cancelled",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[repeater] manual OpenAI-compatible client close failed ("
+                    f"{type(exc).__name__})",
+                )
 
     async def _run_intelligent_generation(
         self,
         *,
         prompt: str,
         system_prompt: str,
-        provider_id: str,
-        model: str,
+        settings: RepeaterSettings,
         unified_msg_origin: str | None,
         feature_name: str,
     ) -> IntelligentGenerationResult:
         """Generate one completion without fallback text or side effects."""
         started_at = time.perf_counter_ns()
-        requested_model = model.strip()
-        chat_provider_id = provider_id.strip()
+        requested_model = settings.intelligent_interrupt_model.strip()
+        if (
+            settings.intelligent_interrupt_provider_mode
+            == INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE
+        ):
+            manual_api_base = settings.intelligent_interrupt_manual_api_base
+            manual_api_key = settings.intelligent_interrupt_manual_api_key
+            if not (manual_api_base and manual_api_key and requested_model):
+                return IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID,
+                    model=requested_model,
+                    latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                    result_code="provider_resolution_failed",
+                )
+            try:
+                completion_text = (
+                    await self._request_manual_openai_compatible_completion(
+                        api_base=manual_api_base,
+                        api_key=manual_api_key,
+                        model=requested_model,
+                        system_prompt=system_prompt,
+                        prompt=prompt,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(
+                    f"[repeater] {feature_name} manual OpenAI-compatible "
+                    f"request failed ({type(exc).__name__})",
+                )
+                return IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID,
+                    model=requested_model,
+                    latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                    result_code="request_failed",
+                )
+            if completion_text is None:
+                logger.warning(
+                    f"[repeater] {feature_name} manual OpenAI-compatible "
+                    "response was invalid",
+                )
+                return IntelligentGenerationResult(
+                    completion=None,
+                    provider_id=MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID,
+                    model=requested_model,
+                    latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                    result_code="invalid_response",
+                )
+            return IntelligentGenerationResult(
+                completion=completion_text,
+                provider_id=MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID,
+                model=requested_model,
+                latency_ms=(time.perf_counter_ns() - started_at) // 1_000_000,
+                result_code="success",
+            )
+
+        chat_provider_id = settings.intelligent_interrupt_provider_id.strip()
         if not chat_provider_id:
             if not unified_msg_origin:
                 return IntelligentGenerationResult(
@@ -973,7 +1253,10 @@ class RepeaterPlugin(Star):
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning(f"[repeater] {feature_name}供应商解析失败: {exc}")
+                logger.warning(
+                    f"[repeater] {feature_name} provider resolution failed "
+                    f"({type(exc).__name__})",
+                )
                 return IntelligentGenerationResult(
                     completion=None,
                     provider_id=None,
@@ -992,7 +1275,10 @@ class RepeaterPlugin(Star):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            logger.warning(f"[repeater] {feature_name}生成请求失败: {exc}")
+            logger.warning(
+                f"[repeater] {feature_name} generation request failed "
+                f"({type(exc).__name__})",
+            )
             return IntelligentGenerationResult(
                 completion=None,
                 provider_id=chat_provider_id,
@@ -1001,7 +1287,7 @@ class RepeaterPlugin(Star):
                 result_code="request_failed",
             )
         if getattr(response, "role", None) != "assistant":
-            logger.warning(f"[repeater] {feature_name}收到非助手响应")
+            logger.warning(f"[repeater] {feature_name} received non-assistant response")
             return IntelligentGenerationResult(
                 completion=None,
                 provider_id=chat_provider_id,
@@ -1011,7 +1297,7 @@ class RepeaterPlugin(Star):
             )
         completion_text = str(getattr(response, "completion_text", "") or "").strip()
         if not completion_text:
-            logger.warning(f"[repeater] {feature_name}收到空响应")
+            logger.warning(f"[repeater] {feature_name} received empty response")
             return IntelligentGenerationResult(
                 completion=None,
                 provider_id=chat_provider_id,
@@ -1036,8 +1322,11 @@ class RepeaterPlugin(Star):
         outcome: Literal["success", "fallback", "failed"],
         group_id: str | None = None,
         mute_duration_seconds: int | None = None,
+        message_text: str | None = None,
+        prompt: str | None = None,
+        repeat_user_count: int | None = None,
     ) -> IntelligentActionRecord:
-        """Build the content-free telemetry row for a completed generation."""
+        """Build one history record for a completed generation."""
         return IntelligentActionRecord(
             occurred_at_ms=time.time_ns() // 1_000_000,
             kind=kind,
@@ -1051,6 +1340,10 @@ class RepeaterPlugin(Star):
             failure_code=(
                 None if result.result_code == "success" else result.result_code
             ),
+            message_text=message_text,
+            prompt=prompt,
+            completion=result.completion,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _generate_intelligent_text(
@@ -1064,13 +1357,14 @@ class RepeaterPlugin(Star):
         feature_name: str,
         history_kind: Literal["repeat", "mute"],
         mute_duration_seconds: int | None = None,
+        message_text: str | None = None,
+        repeat_user_count: int | None = None,
     ) -> str:
-        """Generate runtime text and asynchronously retain its safe outcome."""
+        """Generate runtime text and asynchronously retain its call details."""
         result = await self._run_intelligent_generation(
             prompt=prompt,
             system_prompt=system_prompt,
-            provider_id=settings.intelligent_interrupt_provider_id,
-            model=settings.intelligent_interrupt_model,
+            settings=settings,
             unified_msg_origin=getattr(event, "unified_msg_origin", None),
             feature_name=feature_name,
         )
@@ -1085,6 +1379,9 @@ class RepeaterPlugin(Star):
                 outcome=outcome,
                 group_id=self._group_key(event),
                 mute_duration_seconds=mute_duration_seconds,
+                message_text=message_text,
+                prompt=prompt,
+                repeat_user_count=repeat_user_count,
             ),
         )
         return result.completion if result.completion is not None else fallback_text
@@ -1094,18 +1391,22 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         message: RepeatableMessage,
         fallback_text: str,
+        repeat_user_count: int,
         *,
         settings: RepeaterSettings,
     ) -> str:
         """Generate intelligent interrupt text or retain the existing fallback."""
+        message_text = message.text or message.summary
         return await self._generate_intelligent_text(
             event,
             settings=settings,
-            prompt=f"被复读的内容：{message.text or message.summary}",
+            prompt=f"被复读的内容：{message_text}",
             system_prompt=settings.intelligent_interrupt_prompt,
             fallback_text=fallback_text,
             feature_name="智能打断",
             history_kind="repeat",
+            message_text=message_text,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _generate_intelligent_interrupt_mute_notice(
@@ -1113,6 +1414,8 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         *,
         sender_name: str,
+        message_text: str,
+        repeat_user_count: int,
         duration: int,
         fallback_text: str,
         settings: RepeaterSettings,
@@ -1127,6 +1430,8 @@ class RepeaterPlugin(Star):
             feature_name="智能禁言提示",
             history_kind="mute",
             mute_duration_seconds=duration,
+            message_text=message_text,
+            repeat_user_count=repeat_user_count,
         )
 
     async def _handle_interrupt_mute(
@@ -1134,6 +1439,7 @@ class RepeaterPlugin(Star):
         event: AstrMessageEvent,
         group_key: str,
         attempt: RepeatAttempt,
+        message: RepeatableMessage,
     ) -> None:
         """处理打断复读后的禁言逻辑。
 
@@ -1189,6 +1495,8 @@ class RepeaterPlugin(Star):
                 sender_name=sender_name,
                 duration=duration,
                 fallback_text=fallback_text,
+                message_text=message.text or message.summary,
+                repeat_user_count=attempt.repeat_user_count,
                 settings=settings,
             )
         try:
@@ -1293,6 +1601,7 @@ class RepeaterPlugin(Star):
             if interrupt:
                 base_info = (
                     f"本群{noun}：{status}\n"
+                    f"最小打断触发人数：{settings.interrupt_threshold} 名独立用户\n"
                     f"打断概率：{settings.interrupt_probability * 100:g}%\n"
                     f"可选文本：{len(settings.interrupt_texts)} 条"
                 )
@@ -1310,7 +1619,7 @@ class RepeaterPlugin(Star):
                 return base_info + mute_info
             return (
                 f"本群{noun}：{status}\n"
-                f"触发阈值：{settings.repeat_threshold} 名独立用户\n"
+                f"最小复读触发人数：{settings.repeat_threshold} 名独立用户\n"
                 f"触发概率：{settings.repeat_probability * 100:g}%"
             )
 

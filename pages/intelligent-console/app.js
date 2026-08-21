@@ -6,19 +6,37 @@
   const state = {
     context: null,
     providerCatalogAvailable: true,
+    providerCatalogLoading: false,
+    providerCatalogRequestId: 0,
+    providerMode: "astrbot",
+    manualApiKeyConfigured: false,
+    manualApiKeyClearRequested: false,
     configurationLoaded: false,
     history: {
-      window: "day",
+      window: "24h",
+
       kind: "all",
       page: 1,
       totalPages: 1,
+      expandedRow: null,
     },
     modelRequestId: 0,
     historyRequestId: 0,
   };
 
   const elements = {
+    viewTabs: document.querySelectorAll(".view-tab"),
+    viewPanels: document.querySelectorAll(".workspace-view"),
+    modeTabs: document.querySelectorAll(".route-tab"),
+    modeHelp: document.querySelector("#provider-mode-help"),
+    providerField: document.querySelector("#astrbot-provider-field"),
     provider: document.querySelector("#provider-select"),
+    manualApiBaseField: document.querySelector("#manual-api-base-field"),
+    manualApiKeyField: document.querySelector("#manual-api-key-field"),
+    manualApiBase: document.querySelector("#manual-api-base-input"),
+    manualApiKey: document.querySelector("#manual-api-key-input"),
+    manualApiKeyStatus: document.querySelector("#manual-api-key-status"),
+    clearManualApiKey: document.querySelector("#clear-manual-api-key"),
     model: document.querySelector("#model-input"),
     models: document.querySelector("#model-options"),
     modelHelp: document.querySelector("#model-help"),
@@ -31,6 +49,8 @@
     repeatResult: document.querySelector("#repeat-result"),
     muteResult: document.querySelector("#mute-result"),
     historyFeedback: document.querySelector("#history-feedback"),
+    clearHistory: document.querySelector("#clear-history"),
+
     historyRange: document.querySelector("#history-range"),
     historyKind: document.querySelector("#history-kind"),
     historyRows: document.querySelector("#history-rows"),
@@ -79,12 +99,18 @@
 
   function applyTranslations() {
     document.documentElement.lang = bridge?.getLocale?.() || "zh-CN";
-    document.title = translate("title", "Intelligent Copy Test");
+    document.title = translate("title", "Repeater Console");
     document.querySelectorAll("[data-i18n]").forEach((node) => {
       node.textContent = translate(node.dataset.i18n, node.textContent);
     });
     document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
       node.placeholder = translate(node.dataset.i18nPlaceholder, node.placeholder);
+    });
+    document.querySelectorAll("[data-i18n-aria-label]").forEach((node) => {
+      node.setAttribute(
+        "aria-label",
+        translate(node.dataset.i18nAriaLabel, node.getAttribute("aria-label") || ""),
+      );
     });
   }
 
@@ -96,11 +122,138 @@
     return bridge.apiPost(endpoint, body);
   }
 
+  function normalizeProviderMode(value) {
+    return value === "openai_compatible" ? "openai_compatible" : "astrbot";
+  }
+
+  function isManualProviderMode() {
+    return state.providerMode === "openai_compatible";
+  }
+
+  function syncProviderModeTabs() {
+    elements.modeTabs.forEach((button) => {
+      const selected = button.dataset.providerMode === state.providerMode;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-checked", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+  }
+
+  function viewFromLocation() {
+    const view = window.location?.hash?.replace(/^#/, "");
+    return ["configuration", "tests", "history"].includes(view)
+      ? view
+      : "configuration";
+  }
+
+  function selectView(view, { updateLocation = true } = {}) {
+    const selectedView = ["configuration", "tests", "history"].includes(view)
+      ? view
+      : "configuration";
+    state.activeView = selectedView;
+    elements.viewTabs.forEach((button) => {
+      const selected = button.dataset.view === selectedView;
+      button.classList.toggle("is-active", selected);
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    elements.viewPanels.forEach((panel) => {
+      const selected = panel.id === `${selectedView}-view`;
+      panel.classList.toggle("is-active", selected);
+      panel.hidden = !selected;
+    });
+    if (updateLocation && window.history?.replaceState && window.location) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname || ""}${window.location.search || ""}#${selectedView}`,
+      );
+    }
+  }
+
+  function updateManualApiKeyStatus() {
+    elements.manualApiKeyStatus.textContent = state.manualApiKeyConfigured
+      ? translate(
+        "configuration.manual_api_key.configured",
+        "Saved; this page never displays the key.",
+      )
+      : translate(
+        "configuration.manual_api_key.not_configured",
+        "No API key is saved.",
+      );
+  }
+
   function setConfigurationControlsEnabled(enabled) {
     const editable = Boolean(enabled);
-    elements.provider.disabled = !editable;
+    const manualMode = isManualProviderMode();
+    elements.providerField.hidden = manualMode;
+    elements.manualApiBaseField.hidden = !manualMode;
+    elements.manualApiKeyField.hidden = !manualMode;
+    elements.modeTabs.forEach((button) => {
+      button.disabled = !editable;
+    });
+    syncProviderModeTabs();
+    elements.provider.disabled = (
+      !editable || manualMode || !state.providerCatalogAvailable
+    );
+    elements.manualApiBase.disabled = !editable || !manualMode;
+    elements.manualApiKey.disabled = !editable || !manualMode;
     elements.model.disabled = !editable;
-    elements.save.disabled = !editable;
+    elements.clearManualApiKey.disabled = (
+      !editable || !manualMode || !state.manualApiKeyConfigured
+    );
+    elements.save.disabled = (
+      !editable || (!manualMode && state.providerCatalogLoading)
+    );
+    elements.modeHelp.textContent = manualMode
+      ? translate(
+        "configuration.mode.manual_help",
+        "Direct LLM calls require a saved API base URL, API key, and custom model ID.",
+      )
+      : translate(
+        "configuration.mode.astrbot_help",
+        "Use an AstrBot-configured chat provider; a blank provider follows the triggering session.",
+      );
+    elements.model.placeholder = manualMode
+      ? translate(
+        "configuration.model.manual_placeholder",
+        "OpenAI-compatible direct mode requires a custom model ID",
+      )
+      : translate(
+        "configuration.model.placeholder",
+        "AstrBot mode: leave blank unless overriding the chat provider's model",
+      );
+    elements.modelHelp.textContent = manualMode
+      ? translate(
+        "configuration.model.manual_help",
+        "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
+      )
+      : translate(
+        "configuration.model.help",
+        "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
+      );
+    updateManualApiKeyStatus();
+  }
+
+  function selectProviderMode(mode) {
+    const providerMode = normalizeProviderMode(mode);
+    if (providerMode === state.providerMode) {
+      syncProviderModeTabs();
+      return;
+    }
+    state.providerMode = providerMode;
+    setConfigurationControlsEnabled(state.configurationLoaded);
+    if (!state.configurationLoaded) {
+      return;
+    }
+    if (isManualProviderMode()) {
+      state.providerCatalogRequestId += 1;
+      state.providerCatalogLoading = false;
+      setFeedback(elements.configFeedback);
+      void loadModels();
+    } else {
+      void loadAstrBotProviderCatalog();
+    }
   }
 
   function setRuntimeStatus(element, enabled, activeKey, inactiveKey) {
@@ -108,8 +261,8 @@
     element.classList.toggle("is-active", Boolean(enabled));
     element.classList.toggle("is-inactive", !enabled);
     element.textContent = enabled
-      ? translate(activeKey, "Active")
-      : translate(inactiveKey, "Off");
+      ? translate(activeKey, "Enabled")
+      : translate(inactiveKey, "Disabled");
   }
 
   function createOption(value, label) {
@@ -147,14 +300,74 @@
     });
   }
 
+  async function loadAstrBotProviderCatalog() {
+    const requestId = ++state.providerCatalogRequestId;
+    state.providerCatalogLoading = true;
+    state.providerCatalogAvailable = false;
+    setConfigurationControlsEnabled(state.configurationLoaded);
+    try {
+      const data = await apiGet("intelligent-console/config", {
+        include_provider_catalog: "1",
+      });
+      if (
+        requestId !== state.providerCatalogRequestId
+        || !state.configurationLoaded
+        || isManualProviderMode()
+      ) {
+        return;
+      }
+      const providers = Array.isArray(data.providers) ? data.providers : [];
+      const selectedProvider = elements.provider.value || data.provider_id || "";
+      state.providerCatalogLoading = false;
+      state.providerCatalogAvailable = Boolean(data.provider_catalog_available);
+      populateProviders(
+        providers,
+        selectedProvider,
+        !selectedProvider || providers.some(({ id }) => id === selectedProvider),
+      );
+      setConfigurationControlsEnabled(true);
+      if (!state.providerCatalogAvailable) {
+        populateModels([]);
+        setFeedback(
+          elements.configFeedback,
+          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
+          "error",
+        );
+        return;
+      }
+      setFeedback(elements.configFeedback);
+      await loadModels();
+    } catch (error) {
+      if (
+        requestId !== state.providerCatalogRequestId
+        || !state.configurationLoaded
+        || isManualProviderMode()
+      ) {
+        return;
+      }
+      state.providerCatalogLoading = false;
+      state.providerCatalogAvailable = false;
+      populateModels([]);
+      setConfigurationControlsEnabled(true);
+      setFeedback(elements.configFeedback, formatError(error), "error");
+    }
+  }
+
   async function loadModels() {
-    const providerId = elements.provider.value;
     const requestId = ++state.modelRequestId;
     populateModels([]);
+    if (isManualProviderMode()) {
+      elements.modelHelp.textContent = translate(
+        "configuration.model.manual_help",
+        "OpenAI-compatible direct mode requires a custom model ID and does not enumerate third-party models.",
+      );
+      return;
+    }
+    const providerId = elements.provider.value;
     if (!providerId) {
       elements.modelHelp.textContent = translate(
-        "configuration.provider.help",
-        "A blank provider follows the triggering group-message session and cannot be tested from this page.",
+        "configuration.model.blank_provider_help",
+        "Without a selected chat provider, production messages follow the triggering session and this page cannot run a test. A custom model ID still overrides the chat provider's model.",
       );
       return;
     }
@@ -172,7 +385,7 @@
       populateModels(Array.isArray(data.models) ? data.models : []);
       elements.modelHelp.textContent = translate(
         "configuration.model.help",
-        "Choose a candidate or enter a custom model ID that was not enumerated.",
+        "In AstrBot mode, use this only to override the chat provider's model. Choose a candidate or enter a custom model ID.",
       );
     } catch (error) {
       if (requestId !== state.modelRequestId) {
@@ -202,15 +415,22 @@
   }
 
   async function loadConfiguration() {
-    const wasConfigurationLoaded = state.configurationLoaded;
-    const wasProviderCatalogAvailable = state.providerCatalogAvailable;
-    const restorePreviousConfigurationState = () => {
-      state.configurationLoaded = wasConfigurationLoaded;
-      state.providerCatalogAvailable = wasProviderCatalogAvailable;
-      setConfigurationControlsEnabled(
-        state.configurationLoaded && state.providerCatalogAvailable,
-      );
+    const previousState = {
+      configurationLoaded: state.configurationLoaded,
+      providerCatalogAvailable: state.providerCatalogAvailable,
+      providerMode: state.providerMode,
+      manualApiKeyConfigured: state.manualApiKeyConfigured,
     };
+    const restorePreviousConfigurationState = () => {
+      state.configurationLoaded = previousState.configurationLoaded;
+      state.providerCatalogAvailable = previousState.providerCatalogAvailable;
+      state.providerMode = previousState.providerMode;
+      state.manualApiKeyConfigured = previousState.manualApiKeyConfigured;
+      state.providerCatalogLoading = false;
+      setConfigurationControlsEnabled(state.configurationLoaded);
+    };
+    state.providerCatalogRequestId += 1;
+    state.providerCatalogLoading = false;
     state.configurationLoaded = false;
     setConfigurationControlsEnabled(false);
     setFeedback(
@@ -227,27 +447,33 @@
           "error",
         );
       }
-      const providerCatalogAvailable = Boolean(data.provider_catalog_available);
-      if (!providerCatalogAvailable) {
-        restorePreviousConfigurationState();
-        setFeedback(
-          elements.configFeedback,
-          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
-          "error",
-        );
-        return false;
-      }
-      state.providerCatalogAvailable = providerCatalogAvailable;
+      state.providerCatalogAvailable = Boolean(data.provider_catalog_available);
+      state.providerMode = normalizeProviderMode(data.provider_mode);
+      state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
+      state.manualApiKeyClearRequested = false;
       populateProviders(
         Array.isArray(data.providers) ? data.providers : [],
         data.provider_id || "",
         Boolean(data.provider_exists),
       );
+      elements.manualApiBase.value = data.manual_api_base || "";
+      elements.manualApiKey.value = "";
       elements.model.value = data.model || "";
-      setFeedback(elements.configFeedback);
-      await loadModels();
       state.configurationLoaded = true;
       setConfigurationControlsEnabled(true);
+      if (isManualProviderMode()) {
+        populateModels([]);
+        setFeedback(elements.configFeedback);
+      } else if (!state.providerCatalogAvailable) {
+        setFeedback(
+          elements.configFeedback,
+          translate("common.provider_unavailable", "The chat-provider list is unavailable."),
+          "error",
+        );
+      } else {
+        setFeedback(elements.configFeedback);
+        await loadModels();
+      }
       return true;
     } catch (error) {
       restorePreviousConfigurationState();
@@ -257,7 +483,7 @@
   }
 
   async function saveConfiguration() {
-    if (!state.configurationLoaded || !state.providerCatalogAvailable) {
+    if (!state.configurationLoaded) {
       setFeedback(
         elements.configFeedback,
         translate(
@@ -274,11 +500,30 @@
       translate("configuration.saving", "Saving…"),
     );
     try {
-      const data = await apiPost("intelligent-console/config", {
+      const payload = {
+        provider_mode: state.providerMode,
         provider_id: elements.provider.value.trim(),
+        manual_api_base: elements.manualApiBase.value.trim(),
         model: elements.model.value.trim(),
-      });
+      };
+      if (isManualProviderMode()) {
+        const manualApiKey = elements.manualApiKey.value.trim();
+        if (manualApiKey) {
+          payload.manual_api_key = manualApiKey;
+        } else if (state.manualApiKeyClearRequested) {
+          payload.manual_api_key = "";
+        }
+      }
+      const data = await apiPost("intelligent-console/config", payload);
+      state.providerMode = data.provider_mode === "openai_compatible"
+        ? "openai_compatible"
+        : "astrbot";
+      state.manualApiKeyConfigured = Boolean(data.manual_api_key_configured);
+      state.manualApiKeyClearRequested = false;
+      syncProviderModeTabs();
       elements.provider.value = data.provider_id || "";
+      elements.manualApiBase.value = data.manual_api_base || "";
+      elements.manualApiKey.value = "";
       elements.model.value = data.model || "";
       if (!await loadConfiguration()) {
         return;
@@ -289,12 +534,29 @@
         "success",
       );
     } catch (error) {
+      state.manualApiKeyClearRequested = false;
       setFeedback(elements.configFeedback, formatError(error), "error");
     } finally {
-      setConfigurationControlsEnabled(
-        state.configurationLoaded && state.providerCatalogAvailable,
-      );
+      setConfigurationControlsEnabled(state.configurationLoaded);
     }
+  }
+
+  function clearManualApiKey() {
+    if (!state.configurationLoaded || !isManualProviderMode()) {
+      return;
+    }
+    const confirmed = typeof window.confirm !== "function" || window.confirm(
+      translate(
+        "configuration.manual_api_key.clear_confirm",
+        "Clear the saved API key? This saves immediately and cannot be undone.",
+      ),
+    );
+    if (!confirmed) {
+      return;
+    }
+    state.manualApiKeyClearRequested = true;
+    elements.manualApiKey.value = "";
+    void saveConfiguration();
   }
 
   async function runTest(kind) {
@@ -303,11 +565,14 @@
     button.disabled = true;
     setTestResult(
       result,
-      translate("tests.running", "Generating test copy…"),
+      translate("tests.running", "Running LLM call test…"),
     );
     try {
       const data = await apiPost(`intelligent-console/test/${kind}`, {});
-      const model = data.model || translate("configuration.model.placeholder", "default");
+      const model = data.model || translate(
+        "configuration.model.provider_selected",
+        "Provider-selected model (no custom model ID specified)",
+      );
       setTestResult(
         result,
         interpolate(
@@ -353,22 +618,12 @@
   }
 
   function contextLabel(record) {
-    const values = [];
-    if (record.group_id) {
-      values.push(
-        interpolate(translate("history.group", "Group {group}"), {
-          group: record.group_id,
-        }),
-      );
+    if (!record.group_id) {
+      return translate("history.not_available", "—");
     }
-    if (Number.isInteger(record.mute_duration_seconds)) {
-      values.push(
-        interpolate(translate("history.duration", "Muted {duration} s"), {
-          duration: record.mute_duration_seconds,
-        }),
-      );
-    }
-    return values.join(" · ") || translate("history.not_available", "—");
+    return interpolate(translate("history.group", "Group {group}"), {
+      group: record.group_id,
+    });
   }
 
   function appendCell(row, content, className = "") {
@@ -381,11 +636,66 @@
     return cell;
   }
 
+  function historyDetailValue(value) {
+    if (value === null || value === undefined || value === "") {
+      return translate("history.not_available", "—");
+    }
+    return String(value);
+  }
+
+  function appendHistoryDetail(
+    details,
+    labelKey,
+    fallbackLabel,
+    value,
+    wide = false,
+  ) {
+    const detail = document.createElement("div");
+    detail.className = `history-detail${wide ? " history-detail-wide" : ""}`;
+    const label = document.createElement("dt");
+    label.textContent = translate(labelKey, fallbackLabel);
+    const content = document.createElement("dd");
+    content.textContent = historyDetailValue(value);
+    detail.append(label, content);
+    details.append(detail);
+  }
+
+  function setHistoryRowExpanded(row, detailRow, expanded) {
+    row.classList.toggle("is-expanded", expanded);
+    row.setAttribute("aria-expanded", String(expanded));
+    detailRow.hidden = !expanded;
+  }
+
+  function toggleHistoryRow(row, detailRow) {
+    const expandedRow = state.history.expandedRow;
+    const isCurrentRow = expandedRow?.row === row;
+    if (expandedRow) {
+      setHistoryRowExpanded(expandedRow.row, expandedRow.detailRow, false);
+    }
+    state.history.expandedRow = null;
+    if (!isCurrentRow) {
+      setHistoryRowExpanded(row, detailRow, true);
+      state.history.expandedRow = { row, detailRow };
+    }
+  }
+
   function renderHistoryRows(records) {
+    state.history.expandedRow = null;
     elements.historyRows.replaceChildren();
     elements.historyEmpty.hidden = records.length !== 0;
-    records.forEach((record) => {
+    records.forEach((record, index) => {
+      const recordId = record.id ?? `page-${index}`;
+      const detailId = `history-detail-${recordId}`;
       const row = document.createElement("tr");
+      row.className = "history-record-row";
+      row.tabIndex = 0;
+      row.setAttribute("role", "button");
+      row.setAttribute("aria-controls", detailId);
+      row.setAttribute("aria-expanded", "false");
+      row.setAttribute(
+        "aria-label",
+        translate("history.detail.toggle", "Toggle record details"),
+      );
       appendCell(row, formatTimestamp(record.occurred_at_ms), "cell-meta");
       appendCell(
         row,
@@ -414,7 +724,66 @@
       );
       appendCell(row, contextLabel(record), "cell-meta");
       appendCell(row, `${record.latency_ms ?? 0} ms`, "cell-meta");
-      elements.historyRows.append(row);
+
+      const detailRow = document.createElement("tr");
+      detailRow.className = "history-detail-row";
+      detailRow.id = detailId;
+      detailRow.hidden = true;
+      const detailCell = document.createElement("td");
+      detailCell.className = "history-detail-cell";
+      detailCell.colSpan = 7;
+      const details = document.createElement("dl");
+      details.className = "history-details";
+      appendHistoryDetail(
+        details,
+        "history.detail.message_text",
+        "Repeated content",
+        record.message_text,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.prompt",
+        "LLM request",
+        record.prompt,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.completion",
+        "LLM reply",
+        record.completion,
+        true,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.mute_duration",
+        "Mute duration",
+        Number.isInteger(record.mute_duration_seconds)
+          ? interpolate(translate("history.duration", "Muted {duration} s"), {
+            duration: record.mute_duration_seconds,
+          })
+          : null,
+      );
+      appendHistoryDetail(
+        details,
+        "history.detail.repeat_user_count",
+        "Repeat users",
+        record.repeat_user_count,
+      );
+      detailCell.append(details);
+      detailRow.append(detailCell);
+
+      const toggle = () => toggleHistoryRow(row, detailRow);
+      row.addEventListener("click", toggle);
+      row.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") {
+          return;
+        }
+        event.preventDefault();
+        toggle();
+      });
+      elements.historyRows.append(row, detailRow);
     });
   }
 
@@ -458,22 +827,59 @@
         page_size: 50,
       });
       if (requestId !== state.historyRequestId) {
-        return;
+        return false;
       }
       renderSummary(data.summary || {});
       renderHistoryRange(data.range);
       renderHistoryRows(Array.isArray(data.records) ? data.records : []);
       updatePagination(data.pagination || {});
       setFeedback(elements.historyFeedback);
+      return true;
     } catch (error) {
       if (requestId !== state.historyRequestId) {
-        return;
+        return false;
       }
       renderSummary({});
       renderHistoryRange(null);
       renderHistoryRows([]);
       updatePagination({ page: 1, total_pages: 1 });
       setFeedback(elements.historyFeedback, formatError(error), "error");
+      return false;
+    }
+  }
+
+  async function clearHistory() {
+    const confirmed = typeof window.confirm !== "function" || window.confirm(
+      translate(
+        "history.clear.confirm",
+        "Clear all LLM call records? This cannot be undone.",
+      ),
+    );
+    if (!confirmed) {
+      return;
+    }
+    elements.clearHistory.disabled = true;
+    setFeedback(
+      elements.historyFeedback,
+      translate("history.clear.clearing", "Clearing records…"),
+    );
+    try {
+      const data = await apiPost("intelligent-console/history/clear", {});
+      state.history.page = 1;
+      const refreshed = await loadHistory();
+      if (refreshed) {
+        setFeedback(
+          elements.historyFeedback,
+          interpolate(translate("history.clear.success", "Cleared {count} records."), {
+            count: Number(data?.deleted) || 0,
+          }),
+          "success",
+        );
+      }
+    } catch (error) {
+      setFeedback(elements.historyFeedback, formatError(error), "error");
+    } finally {
+      elements.clearHistory.disabled = false;
     }
   }
 
@@ -483,15 +889,66 @@
     document.querySelectorAll(".range-tab").forEach((button) => {
       const selected = button.dataset.window === window;
       button.classList.toggle("is-active", selected);
-      button.setAttribute("aria-selected", String(selected));
+      button.setAttribute("aria-pressed", String(selected));
     });
     void loadHistory();
   }
 
-  function bindControls() {
-    elements.provider.addEventListener("change", () => {
-      void loadModels();
+  function bindViewTabs() {
+    const tabs = Array.from(elements.viewTabs);
+    tabs.forEach((button, index) => {
+      button.addEventListener("click", () => selectView(button.dataset.view));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        nextTab.focus?.();
+        selectView(nextTab.dataset.view);
+      });
     });
+  }
+
+  function bindModeTabs() {
+    const tabs = Array.from(elements.modeTabs);
+    tabs.forEach((button, index) => {
+      button.addEventListener("click", () => selectProviderMode(button.dataset.providerMode));
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        const nextIndex = event.key === "Home"
+          ? 0
+          : event.key === "End"
+            ? tabs.length - 1
+            : (index + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + tabs.length) % tabs.length;
+        const nextTab = tabs[nextIndex];
+        nextTab.focus?.();
+        selectProviderMode(nextTab.dataset.providerMode);
+      });
+    });
+  }
+
+  function bindControls() {
+    bindViewTabs();
+    bindModeTabs();
+    elements.provider.addEventListener("change", () => {
+      if (!isManualProviderMode()) {
+        void loadModels();
+      }
+    });
+    elements.clearManualApiKey.addEventListener("click", clearManualApiKey);
+    elements.clearHistory.addEventListener("click", () => {
+      void clearHistory();
+    });
+
     elements.save.addEventListener("click", () => {
       void saveConfiguration();
     });
@@ -525,8 +982,12 @@
 
   async function start() {
     applyTranslations();
+    selectView(viewFromLocation(), { updateLocation: false });
     setConfigurationControlsEnabled(false);
     bindControls();
+    window.addEventListener?.("hashchange", () => {
+      selectView(viewFromLocation(), { updateLocation: false });
+    });
     if (!bridge) {
       setFeedback(
         elements.configFeedback,

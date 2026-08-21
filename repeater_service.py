@@ -116,6 +116,7 @@ class RepeatAttempt:
         message_id: 触发尝试的消息 ID。
         previous_message_id: 处理该消息前记录的消息 ID。
         sender_id: 触发复读或打断的用户 ID。
+        repeat_user_count: 本次连续复读中已计入的不同用户数。
         response_text: 要发送的纯文本或消息摘要。
         response_chain: 普通复读时要原样回发的消息链。
         interrupted: 该尝试是否为打断复读。
@@ -125,6 +126,7 @@ class RepeatAttempt:
     message_id: str
     previous_message_id: str
     sender_id: str
+    repeat_user_count: int
     response_text: str
     response_chain: tuple[Any, ...]
     interrupted: bool
@@ -461,6 +463,7 @@ class RepeaterStateService:
                         sender_id,
                         message,
                         interrupted,
+                        repeat_user_count=len(state.repeated_users),
                     )
                     state.pending_fingerprints.add(fingerprint)
                     try:
@@ -646,14 +649,19 @@ class RepeaterStateService:
         """
         sender_was_counted = sender_id in state.repeated_users
         state.repeated_users.add(sender_id)
-        threshold_reached = len(state.repeated_users) >= self.settings.repeat_threshold
+        repeat_threshold_reached = (
+            len(state.repeated_users) >= self.settings.repeat_threshold
+        )
+        interrupt_threshold_reached = (
+            len(state.repeated_users) >= self.settings.interrupt_threshold
+        )
         interrupted = (
-            threshold_reached
+            interrupt_threshold_reached
             and interrupt_enabled
             and random.random() < self.settings.interrupt_probability
         )
         should_repeat = (
-            threshold_reached
+            repeat_threshold_reached
             and not interrupted
             and repeat_enabled
             and random.random() < self.settings.repeat_probability
@@ -672,6 +680,7 @@ class RepeaterStateService:
         sender_id: str,
         message: RepeatableMessage,
         interrupted: bool,
+        repeat_user_count: int,
     ) -> RepeatAttempt:
         """使用已决定的模式构造发送层所需的复读尝试。"""
         return RepeatAttempt(
@@ -679,6 +688,7 @@ class RepeaterStateService:
             message_id=message_id,
             previous_message_id=previous_message_id,
             sender_id=sender_id,
+            repeat_user_count=repeat_user_count,
             response_text=(
                 random.choice(self.settings.interrupt_texts)
                 if interrupted

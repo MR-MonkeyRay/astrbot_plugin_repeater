@@ -4,17 +4,17 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>智能文案测试</title>
+    <title>复读机控制台</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="console-shell" aria-labelledby="page-title">
       <header class="masthead">
         <div>
-          <p class="eyebrow" data-i18n="eyebrow">REPEATER / INTELLIGENT CONSOLE</p>
-          <h1 id="page-title" data-i18n="heading">智能文案测试</h1>
+          <p class="eyebrow" data-i18n="eyebrow">REPEATER / LLM CALL CONSOLE</p>
+          <h1 id="page-title" data-i18n="heading">复读机控制台</h1>
           <p class="lede" data-i18n="intro">
-            保存共享供应商与模型，执行无副作用的文案测试，并查看七日内记录。
+            配置智能打断与智能禁言提示共用的 LLM供应商，使用固定模拟输入验证LLM调用结果，并查看近七天的调用记录。LLM调用测试结果仅返回当前页面，不发送群消息、不执行禁言，也不修改复读状态。
           </p>
         </div>
         <div class="runtime-status" aria-label="智能功能状态">
@@ -23,141 +23,312 @@
         </div>
       </header>
 
-      <section class="panel configuration-panel" aria-labelledby="configuration-title">
-        <div class="panel-heading">
-          <div>
-            <p class="section-kicker" data-i18n="configuration.kicker">共享配置</p>
-            <h2 id="configuration-title" data-i18n="configuration.title">供应商与模型</h2>
+      <nav
+        class="view-navigation"
+        role="tablist"
+        aria-label="页面导航"
+        data-i18n-aria-label="navigation.label"
+      >
+        <button
+          class="view-tab is-active"
+          id="configuration-tab"
+          role="tab"
+          type="button"
+          data-view="configuration"
+          aria-controls="configuration-view"
+          aria-selected="true"
+          tabindex="0"
+        >
+          <span class="view-tab-index" aria-hidden="true">01</span>
+          <span data-i18n="navigation.configuration">LLM供应商设置</span>
+        </button>
+        <button
+          class="view-tab"
+          id="tests-tab"
+          role="tab"
+          type="button"
+          data-view="tests"
+          aria-controls="tests-view"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          <span class="view-tab-index" aria-hidden="true">02</span>
+          <span data-i18n="navigation.tests">LLM调用测试</span>
+        </button>
+        <button
+          class="view-tab"
+          id="history-tab"
+          role="tab"
+          type="button"
+          data-view="history"
+          aria-controls="history-view"
+          aria-selected="false"
+          tabindex="-1"
+        >
+          <span class="view-tab-index" aria-hidden="true">03</span>
+          <span data-i18n="navigation.history">调用记录</span>
+        </button>
+      </nav>
+
+      <section
+        class="workspace-view is-active"
+        id="configuration-view"
+        role="tabpanel"
+        aria-labelledby="configuration-tab"
+        tabindex="-1"
+      >
+        <section class="panel configuration-panel" aria-labelledby="configuration-title">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker" data-i18n="configuration.kicker">智能打断与禁言提示共用</p>
+              <h2 id="configuration-title" data-i18n="configuration.title">LLM供应商配置</h2>
+            </div>
+            <output id="config-feedback" class="feedback" aria-live="polite"></output>
           </div>
-          <output id="config-feedback" class="feedback" aria-live="polite"></output>
-        </div>
-        <div class="configuration-grid">
-          <label class="field">
-            <span data-i18n="configuration.provider.label">聊天供应商</span>
-            <select id="provider-select" aria-describedby="provider-help" disabled></select>
-            <small id="provider-help" data-i18n="configuration.provider.help">
-              留空会跟随触发群消息的会话；该模式不能从页面执行测试。
-            </small>
-          </label>
-          <label class="field">
-            <span data-i18n="configuration.model.label">模型 ID</span>
-            <input
-              id="model-input"
-              list="model-options"
-              maxlength="256"
-              autocomplete="off"
-              data-i18n-placeholder="configuration.model.placeholder"
-              placeholder="留空使用供应商默认模型"
-              disabled
-            />
-            <datalist id="model-options"></datalist>
-            <small id="model-help" data-i18n="configuration.model.help">
-              从候选列表选择，或输入未枚举的自定义模型 ID。
-            </small>
-          </label>
-          <div class="configuration-actions">
-            <button class="button button-primary" id="save-config" type="button" disabled>
-              <span data-i18n="configuration.save">保存配置</span>
+
+          <div class="configuration-layout">
+            <div class="route-choice">
+              <p
+                class="route-choice-label"
+                id="provider-mode-label"
+                data-i18n="configuration.mode.label"
+              >供应商接入方式</p>
+              <div
+                class="route-tabs"
+                role="radiogroup"
+                aria-labelledby="provider-mode-label"
+                aria-describedby="provider-mode-help"
+              >
+                <button
+                  class="route-tab is-active"
+                  id="provider-mode-astrbot"
+                  type="button"
+                  role="radio"
+                  data-provider-mode="astrbot"
+                  aria-checked="true"
+                  tabindex="0"
+                >
+                  <span class="route-tab-name" data-i18n="configuration.mode.astrbot">AstrBot 聊天供应商</span>
+                  <span class="route-tab-hint" data-i18n="configuration.mode.astrbot_description">复用 AstrBot 中已配置的聊天供应商</span>
+                </button>
+                <button
+                  class="route-tab"
+                  id="provider-mode-manual"
+                  type="button"
+                  role="radio"
+                  data-provider-mode="openai_compatible"
+                  aria-checked="false"
+                  tabindex="-1"
+                >
+                  <span class="route-tab-name" data-i18n="configuration.mode.openai_compatible">OpenAI 兼容直连</span>
+                  <span class="route-tab-hint" data-i18n="configuration.mode.manual_description">直接调用 OpenAI 兼容服务</span>
+                </button>
+              </div>
+              <p id="provider-mode-help" class="route-help" data-i18n="configuration.mode.astrbot_help">
+                复用 AstrBot 中已配置的聊天供应商。未指定供应商时，运行消息会跟随触发会话；LLM调用测试必须先选择并保存供应商。
+              </p>
+            </div>
+
+            <div class="configuration-fields">
+              <label class="field field--provider" id="astrbot-provider-field">
+                <span data-i18n="configuration.provider.label">聊天供应商</span>
+                <select id="provider-select" aria-describedby="provider-help" disabled></select>
+                <small id="provider-help" data-i18n="configuration.provider.help">
+                  未指定供应商时，运行消息会跟随触发群消息的会话；LLM调用测试不能使用该设置。
+                </small>
+              </label>
+              <label class="field field--manual-base" id="manual-api-base-field" hidden>
+                <span data-i18n="configuration.manual_api_base.label">API Base URL</span>
+                <input
+                  id="manual-api-base-input"
+                  type="url"
+                  maxlength="256"
+                  autocomplete="off"
+                  data-i18n-placeholder="configuration.manual_api_base.placeholder"
+                  placeholder="例如 http://localhost:8000/v1"
+                  disabled
+                />
+                <small data-i18n="configuration.manual_api_base.help">
+                  仅用于 OpenAI 兼容直连。填写服务根路径（可含服务要求的版本路径）；LLM调用还需要已保存的 API Key 与自定义模型 ID。
+                </small>
+              </label>
+              <div class="field field--manual-key" id="manual-api-key-field" hidden>
+                <label for="manual-api-key-input" data-i18n="configuration.manual_api_key.label">API Key</label>
+                <input
+                  id="manual-api-key-input"
+                  type="password"
+                  maxlength="512"
+                  autocomplete="new-password"
+                  aria-describedby="manual-api-key-status manual-api-key-help"
+                  data-i18n-placeholder="configuration.manual_api_key.placeholder"
+                  placeholder="留空以保留已保存的 Key"
+                  disabled
+                />
+                <div class="manual-api-key-status-row">
+                  <output id="manual-api-key-status" class="manual-api-key-status" aria-live="polite"></output>
+                  <button class="button button-quiet" id="clear-manual-api-key" type="button" disabled>
+                    <span data-i18n="configuration.manual_api_key.clear">清除已保存的 Key</span>
+                  </button>
+                </div>
+                <small id="manual-api-key-help" data-i18n="configuration.manual_api_key.help">
+                  仅用于 OpenAI 兼容直连。留空可保留已保存的 Key；本页不会显示 Key。LLM调用还需要 API Base URL 和自定义模型 ID。
+                </small>
+              </div>
+              <label class="field field--model">
+                <span data-i18n="configuration.model.label">自定义模型 ID</span>
+                <input
+                  id="model-input"
+                  list="model-options"
+                  maxlength="256"
+                  autocomplete="off"
+                  aria-describedby="model-help"
+                  data-i18n-placeholder="configuration.model.placeholder"
+                  placeholder="AstrBot 模式通常留空，不覆盖聊天供应商的模型"
+                  disabled
+                />
+                <datalist id="model-options"></datalist>
+                <small id="model-help" data-i18n="configuration.model.help">
+                  仅需覆盖所选聊天供应商的模型时填写。可选择候选模型，或手动输入模型 ID。
+                </small>
+              </label>
+              <div class="configuration-actions">
+                <button class="button button-primary" id="save-config" type="button" disabled>
+                  <span data-i18n="configuration.save">保存配置</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <section
+        class="workspace-view"
+        id="tests-view"
+        role="tabpanel"
+        aria-labelledby="tests-tab"
+        tabindex="-1"
+        hidden
+      >
+        <section class="test-grid" aria-labelledby="tests-tab">
+          <article class="panel test-card" aria-labelledby="repeat-test-title">
+            <div class="test-card-heading">
+              <p class="section-kicker" data-i18n="tests.repeat.kicker">固定模拟复读内容</p>
+              <h2 id="repeat-test-title" data-i18n="tests.repeat.title">智能打断 LLM调用测试</h2>
+            </div>
+            <p class="test-copy" data-i18n="tests.repeat.description">
+              以固定模拟复读内容执行已保存的智能打断 LLM调用。结果只返回当前页面，不发送群消息，也不修改复读状态。
+            </p>
+            <button class="button button-secondary" id="test-repeat" type="button">
+              <span data-i18n="tests.repeat.action">测试智能打断 LLM调用</span>
             </button>
-          </div>
-        </div>
+            <output id="repeat-result" class="test-result" aria-live="polite"></output>
+          </article>
+
+          <article class="panel test-card" aria-labelledby="mute-test-title">
+            <div class="test-card-heading">
+              <p class="section-kicker" data-i18n="tests.mute.kicker">固定模拟禁言信息</p>
+              <h2 id="mute-test-title" data-i18n="tests.mute.title">智能禁言提示 LLM调用测试</h2>
+            </div>
+            <p class="test-copy" data-i18n="tests.mute.description">
+              以“测试用户 / 60 秒”为固定输入执行已保存的智能禁言提示 LLM调用。结果只返回当前页面，不执行禁言、不发送群消息，也不修改复读状态。
+            </p>
+            <button class="button button-warning" id="test-mute" type="button">
+              <span data-i18n="tests.mute.action">测试智能禁言 LLM调用</span>
+            </button>
+            <output id="mute-result" class="test-result" aria-live="polite"></output>
+          </article>
+        </section>
       </section>
 
-      <section class="test-grid" aria-label="智能文案测试">
-        <article class="panel test-card" aria-labelledby="repeat-test-title">
-          <div class="test-card-heading">
-            <p class="section-kicker" data-i18n="tests.repeat.kicker">固定模拟输入</p>
-            <h2 id="repeat-test-title" data-i18n="tests.repeat.title">智能复读文案测试</h2>
+      <section
+        class="workspace-view"
+        id="history-view"
+        role="tabpanel"
+        aria-labelledby="history-tab"
+        tabindex="-1"
+        hidden
+      >
+        <section class="panel history-panel" aria-labelledby="history-title">
+          <div class="panel-heading history-heading">
+            <div>
+              <p class="section-kicker" data-i18n="history.kicker">展开记录查看输入与调用结果</p>
+              <h2 id="history-title" data-i18n="history.title">调用记录</h2>
+              <p class="history-note" id="history-range" aria-live="polite"></p>
+            </div>
+            <output id="history-feedback" class="feedback" aria-live="polite"></output>
           </div>
-          <p class="test-copy" data-i18n="tests.repeat.description">
-            使用保存的智能打断提示词生成一条测试文案，不会发送群消息。
+
+          <div class="history-controls">
+            <div
+              class="range-tabs"
+              role="group"
+              aria-label="调用记录时间范围"
+              data-i18n-aria-label="history.windows.label"
+            >
+              <button class="range-tab is-active" data-window="24h" type="button" aria-pressed="true" data-i18n="history.windows.24h">24H</button>
+
+              <button class="range-tab" data-window="2d" type="button" aria-pressed="false" data-i18n="history.windows.2d">2天</button>
+              <button class="range-tab" data-window="3d" type="button" aria-pressed="false" data-i18n="history.windows.3d">3天</button>
+              <button class="range-tab" data-window="7d" type="button" aria-pressed="false" data-i18n="history.windows.7d">7天</button>
+            </div>
+            <div class="history-actions">
+              <label class="inline-field" for="history-kind">
+                <span data-i18n="history.filter.label">类型</span>
+                <select id="history-kind">
+                  <option value="all" data-i18n="history.filter.all">全部</option>
+                  <option value="repeat" data-i18n="history.filter.repeat">智能打断</option>
+                  <option value="mute" data-i18n="history.filter.mute">智能禁言</option>
+                </select>
+              </label>
+              <button class="button button-warning" id="clear-history" type="button" data-i18n="history.clear.action">清理调用记录</button>
+            </div>
+
+          </div>
+
+          <div class="summary-grid" aria-label="记录汇总">
+            <div class="metric"><span data-i18n="history.summary.total">总计</span><strong id="metric-total">0</strong></div>
+            <div class="metric"><span data-i18n="history.summary.repeat">打断</span><strong id="metric-repeat">0</strong></div>
+            <div class="metric"><span data-i18n="history.summary.mute">禁言</span><strong id="metric-mute">0</strong></div>
+            <div class="metric metric-success"><span data-i18n="history.summary.success">成功</span><strong id="metric-success">0</strong></div>
+            <div class="metric metric-fallback"><span data-i18n="history.summary.fallback">后备</span><strong id="metric-fallback">0</strong></div>
+            <div class="metric metric-failed"><span data-i18n="history.summary.failed">失败</span><strong id="metric-failed">0</strong></div>
+          </div>
+
+          <div class="table-wrap" tabindex="0">
+            <table>
+              <thead>
+                <tr>
+                  <th data-i18n="history.table.time">时间</th>
+                  <th data-i18n="history.table.source">来源</th>
+                  <th data-i18n="history.table.action">动作</th>
+                  <th data-i18n="history.table.outcome">结果</th>
+                  <th data-i18n="history.table.provider">供应商 / 模型</th>
+                  <th data-i18n="history.table.context">群ID</th>
+
+                  <th data-i18n="history.table.latency">耗时</th>
+                </tr>
+              </thead>
+              <tbody id="history-rows"></tbody>
+            </table>
+            <p id="history-empty" class="empty-state" hidden data-i18n="history.empty">所选时间范围内暂无调用记录。</p>
+          </div>
+
+          <nav
+            class="pagination"
+            aria-label="记录分页"
+            data-i18n-aria-label="history.pagination.label"
+          >
+            <button class="button button-quiet" id="history-prev" type="button" data-i18n="history.pagination.previous">上一页</button>
+            <span id="history-page" aria-live="polite"></span>
+            <button class="button button-quiet" id="history-next" type="button" data-i18n="history.pagination.next">下一页</button>
+          </nav>
+          <p class="privacy-note" data-i18n="history.privacy">
+            调用记录可包含复读内容、LLM请求和调用结果，可在此页展开查看；超过七天的数据由后台定期清理。
           </p>
-          <button class="button button-secondary" id="test-repeat" type="button">
-            <span data-i18n="tests.repeat.action">测试智能复读</span>
-          </button>
-          <output id="repeat-result" class="test-result" aria-live="polite"></output>
-        </article>
-
-        <article class="panel test-card" aria-labelledby="mute-test-title">
-          <div class="test-card-heading">
-            <p class="section-kicker" data-i18n="tests.mute.kicker">固定模拟输入</p>
-            <h2 id="mute-test-title" data-i18n="tests.mute.title">智能禁言提示测试</h2>
-          </div>
-          <p class="test-copy" data-i18n="tests.mute.description">
-            使用“测试用户 / 60 秒”生成提示文案，不会禁言、发送消息或改变群状态。
-          </p>
-          <button class="button button-warning" id="test-mute" type="button">
-            <span data-i18n="tests.mute.action">测试智能禁言</span>
-          </button>
-          <output id="mute-result" class="test-result" aria-live="polite"></output>
-        </article>
-      </section>
-
-      <section class="panel history-panel" aria-labelledby="history-title">
-        <div class="panel-heading history-heading">
-          <div>
-            <p class="section-kicker" data-i18n="history.kicker">仅保留运行元数据</p>
-            <h2 id="history-title" data-i18n="history.title">智能文案记录</h2>
-            <p class="history-note" id="history-range" aria-live="polite"></p>
-          </div>
-          <output id="history-feedback" class="feedback" aria-live="polite"></output>
-        </div>
-
-        <div class="history-controls">
-          <div class="range-tabs" role="tablist" aria-label="记录时间范围">
-            <button class="range-tab is-active" data-window="day" role="tab" type="button" data-i18n="history.windows.day">当天</button>
-            <button class="range-tab" data-window="24h" role="tab" type="button" data-i18n="history.windows.24h">24H</button>
-            <button class="range-tab" data-window="2d" role="tab" type="button" data-i18n="history.windows.2d">2天</button>
-            <button class="range-tab" data-window="3d" role="tab" type="button" data-i18n="history.windows.3d">3天</button>
-            <button class="range-tab" data-window="7d" role="tab" type="button" data-i18n="history.windows.7d">7天</button>
-          </div>
-          <label class="inline-field" for="history-kind">
-            <span data-i18n="history.filter.label">类型</span>
-            <select id="history-kind">
-              <option value="all" data-i18n="history.filter.all">全部</option>
-              <option value="repeat" data-i18n="history.filter.repeat">智能复读</option>
-              <option value="mute" data-i18n="history.filter.mute">智能禁言</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="summary-grid" aria-label="记录汇总">
-          <div class="metric"><span data-i18n="history.summary.total">总计</span><strong id="metric-total">0</strong></div>
-          <div class="metric"><span data-i18n="history.summary.repeat">复读</span><strong id="metric-repeat">0</strong></div>
-          <div class="metric"><span data-i18n="history.summary.mute">禁言</span><strong id="metric-mute">0</strong></div>
-          <div class="metric metric-success"><span data-i18n="history.summary.success">成功</span><strong id="metric-success">0</strong></div>
-          <div class="metric metric-fallback"><span data-i18n="history.summary.fallback">后备</span><strong id="metric-fallback">0</strong></div>
-          <div class="metric metric-failed"><span data-i18n="history.summary.failed">失败</span><strong id="metric-failed">0</strong></div>
-        </div>
-
-        <div class="table-wrap" tabindex="0">
-          <table>
-            <thead>
-              <tr>
-                <th data-i18n="history.table.time">时间</th>
-                <th data-i18n="history.table.source">来源</th>
-                <th data-i18n="history.table.action">动作</th>
-                <th data-i18n="history.table.outcome">结果</th>
-                <th data-i18n="history.table.provider">供应商 / 模型</th>
-                <th data-i18n="history.table.context">群 / 时长</th>
-                <th data-i18n="history.table.latency">耗时</th>
-              </tr>
-            </thead>
-            <tbody id="history-rows"></tbody>
-          </table>
-          <p id="history-empty" class="empty-state" hidden data-i18n="history.empty">这个时间范围内还没有记录。</p>
-        </div>
-
-        <nav class="pagination" aria-label="记录分页">
-          <button class="button button-quiet" id="history-prev" type="button" data-i18n="history.pagination.previous">上一页</button>
-          <span id="history-page" aria-live="polite"></span>
-          <button class="button button-quiet" id="history-next" type="button" data-i18n="history.pagination.next">下一页</button>
-        </nav>
-        <p class="privacy-note" data-i18n="history.privacy">
-          记录不会保存群聊原文、生成结果、发送者标识、异常详情或任何凭据；超过七天的数据会在后台清理。
-        </p>
+        </section>
       </section>
     </main>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>
