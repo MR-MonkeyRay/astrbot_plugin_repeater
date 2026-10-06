@@ -1,11 +1,14 @@
 """复读状态机及其持久化发送事务。
 
 状态服务以单群锁和全局保存锁协调并发消息，确保发送前的 pending 标记和
-发送结果的提交或回滚保持一致。
+发送结果的提交或回滚保持一致。只有群级开关、pending 标记、冷却表和待兑现的
+顶替禁言会持久化；
+连续序列计数仅保存在内存中，未触发复读的普通消息不会写入存储。
 """
 
 import asyncio
 import random
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,41 +21,59 @@ else:
     from repeater_messages import RepeatableMessage
 
 
+MAX_COOLDOWN_ENTRIES = 256
+"""单群冷却表的最大条目数；超出时淘汰最早到期的指纹。"""
+
+
 @dataclass(slots=True)
 class GroupRepeaterState:
-    """一个群的可持久化复读状态。
+    """一个群的复读状态。
 
     Attributes:
         enabled_override: 普通复读的群级覆盖值；None 时使用全局默认值。
         interrupt_enabled_override: 打断复读的群级覆盖值；None 时使用全局默认值。
-        last_fingerprint: 当前连续消息序列的规范化指纹。
-        repeated_users: 当前序列中已经计入阈值的发送者 ID。
-        repeated_fingerprints: 已成功发送过、不可再次复读的消息指纹。
         pending_fingerprints: 已持久化但尚未确认发送结果的消息指纹。
-        last_message_id: 最近处理的消息 ID，用于重复事件去重。
+        cooldowns: 已成功复读或打断的指纹及其冷却到期时间（Unix 秒）。
+        proxy_mute_source: 待兑现顶替禁言中免于禁言的群管名称；None 表示无待兑现。
+        last_fingerprint: 当前连续消息序列的规范化指纹；仅保存在内存中。
+        repeated_users: 当前序列中已经计入阈值的发送者 ID；仅保存在内存中。
+        last_message_id: 最近处理的消息 ID，用于重复事件去重；仅保存在内存中。
     """
 
     enabled_override: bool | None = None
     interrupt_enabled_override: bool | None = None
+    pending_fingerprints: set[str] = field(default_factory=set)
+    cooldowns: dict[str, float] = field(default_factory=dict)
+    proxy_mute_source: str | None = None
     last_fingerprint: str = ""
     repeated_users: set[str] = field(default_factory=set)
-    repeated_fingerprints: set[str] = field(default_factory=set)
-    pending_fingerprints: set[str] = field(default_factory=set)
     last_message_id: str = ""
 
     @classmethod
-    def from_dict(cls, raw_state: dict[str, Any]) -> "GroupRepeaterState":
+    def from_dict(
+        cls,
+        raw_state: dict[str, Any],
+        *,
+        legacy_cooldown_until: float,
+    ) -> "GroupRepeaterState":
         """从持久化字典恢复单群状态。
 
         Args:
             raw_state: 从插件 KV 存储读出的单群状态。
+            legacy_cooldown_until: 旧版永久抑制指纹迁移后的冷却到期时间。
 
         Returns:
             经过类型规范化的群复读状态。
 
         Raises:
-            TypeError: 集合字段不是持久化要求的列表。
+            TypeError: 集合字段不是持久化要求的列表或对象。
         """
+        cooldowns = cls._load_cooldowns(raw_state.get("cooldowns", {}))
+        for legacy_fingerprint in cls._load_string_set(
+            raw_state.get("repeated_fingerprints", []),
+        ):
+            cooldowns.setdefault(legacy_fingerprint, legacy_cooldown_until)
+        proxy_mute_source = raw_state.get("proxy_mute_source")
         return cls(
             enabled_override=(
                 True if raw_state.get("enabled_override") is True else None
@@ -60,34 +81,59 @@ class GroupRepeaterState:
             interrupt_enabled_override=(
                 True if raw_state.get("interrupt_enabled_override") is True else None
             ),
-            last_fingerprint=str(raw_state.get("last_fingerprint", "")),
-            repeated_users=cls._load_string_set(
-                raw_state.get("repeated_users", []),
-            ),
-            repeated_fingerprints=cls._load_string_set(
-                raw_state.get("repeated_fingerprints", []),
-            ),
             pending_fingerprints=cls._load_string_set(
                 raw_state.get("pending_fingerprints", []),
             ),
-            last_message_id=str(raw_state.get("last_message_id", "")),
+            cooldowns=cooldowns,
+            proxy_mute_source=(
+                proxy_mute_source if isinstance(proxy_mute_source, str) else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """将状态转换为稳定、可序列化的持久化字典。
+        """将需要跨重启保留的状态转换为稳定、可序列化的字典。
 
         Returns:
             集合已排序、可直接写入插件 KV 存储的状态字典。
         """
-        return {
+        payload: dict[str, Any] = {
             "enabled_override": self.enabled_override,
             "interrupt_enabled_override": self.interrupt_enabled_override,
-            "last_fingerprint": self.last_fingerprint,
-            "repeated_users": sorted(self.repeated_users),
-            "repeated_fingerprints": sorted(self.repeated_fingerprints),
             "pending_fingerprints": sorted(self.pending_fingerprints),
-            "last_message_id": self.last_message_id,
+            "cooldowns": {
+                fingerprint: self.cooldowns[fingerprint]
+                for fingerprint in sorted(self.cooldowns)
+            },
         }
+        if self.proxy_mute_source is not None:
+            payload["proxy_mute_source"] = self.proxy_mute_source
+        return payload
+
+    def has_persistent_data(self) -> bool:
+        """返回该群是否有需要写入存储的状态。"""
+        return bool(
+            self.enabled_override is not None
+            or self.interrupt_enabled_override is not None
+            or self.pending_fingerprints
+            or self.cooldowns
+            or self.proxy_mute_source is not None
+        )
+
+    def prune_cooldowns(self, now: float) -> None:
+        """删除已到期的冷却条目，并把条目数限制在上限内。"""
+        expired = [
+            fingerprint
+            for fingerprint, expires_at in self.cooldowns.items()
+            if expires_at <= now
+        ]
+        for fingerprint in expired:
+            del self.cooldowns[fingerprint]
+        overflow = len(self.cooldowns) - MAX_COOLDOWN_ENTRIES
+        if overflow > 0:
+            for fingerprint in sorted(self.cooldowns, key=self.cooldowns.get)[
+                :overflow
+            ]:
+                del self.cooldowns[fingerprint]
 
     @staticmethod
     def _load_string_set(value: Any) -> set[str]:
@@ -105,6 +151,23 @@ class GroupRepeaterState:
         if not isinstance(value, list):
             raise TypeError("集合字段必须是列表")
         return {str(item) for item in value if isinstance(item, (str, int))}
+
+    @staticmethod
+    def _load_cooldowns(value: Any) -> dict[str, float]:
+        """将持久化冷却对象解析为指纹到到期时间的映射。
+
+        Raises:
+            TypeError: value 不是对象。
+        """
+        if not isinstance(value, dict):
+            raise TypeError("cooldowns 必须是对象")
+        return {
+            str(fingerprint): float(expires_at)
+            for fingerprint, expires_at in value.items()
+            if isinstance(fingerprint, str)
+            and isinstance(expires_at, (int, float))
+            and not isinstance(expires_at, bool)
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +212,7 @@ class RepeaterStateService:
         save_states: Callable[[dict[str, dict[str, Any]]], Awaitable[None]],
         *,
         logger: Any | None = None,
+        clock: Callable[[], float] = time.time,
     ) -> None:
         """初始化状态服务及其异步存储依赖。
 
@@ -157,11 +221,13 @@ class RepeaterStateService:
             load_states: 异步读取全部群状态的函数。
             save_states: 异步保存全部群状态快照的函数。
             logger: 可选日志对象；为 None 时不记录服务日志。
+            clock: 返回 Unix 秒的时钟，用于冷却计算；测试可替换。
         """
         self.settings = settings
         self._load_states = load_states
         self._save_states = save_states
         self._logger = logger
+        self.clock = clock
         self.group_states: dict[str, GroupRepeaterState] = {}
         self.group_locks: dict[str, asyncio.Lock] = {}
         self.save_lock = asyncio.Lock()
@@ -176,13 +242,21 @@ class RepeaterStateService:
             self._warning("[repeater] group_states 数据异常，使用空状态")
             raw_states = {}
 
+        now = self.clock()
+        legacy_cooldown_until = now + self.settings.repeat_cooldown_seconds
         for group_key, raw_state in raw_states.items():
             if not isinstance(group_key, str) or not isinstance(raw_state, dict):
                 continue
             try:
-                self.group_states[group_key] = GroupRepeaterState.from_dict(raw_state)
+                state = GroupRepeaterState.from_dict(
+                    raw_state,
+                    legacy_cooldown_until=legacy_cooldown_until,
+                )
             except (TypeError, ValueError) as exc:
                 self._warning(f"[repeater] 群 {group_key} 状态加载失败: {exc}")
+                continue
+            state.prune_cooldowns(now)
+            self.group_states[group_key] = state
 
         self._info(f"[repeater] 已加载 {len(self.group_states)} 个群的复读状态")
 
@@ -349,7 +423,7 @@ class RepeaterStateService:
                     state.enabled_override = previous_override
                     state.repeated_users = previous_users
                     state.last_fingerprint = previous_fingerprint
-                    self._restore_config_after_failure()
+                    await self._restore_config_after_failure()
                     raise
                 return previously_enabled == enabled
 
@@ -387,7 +461,7 @@ class RepeaterStateService:
                     else:
                         self.settings.interrupt_disabled_group_ids.discard(group_key)
                     state.interrupt_enabled_override = previous_override
-                    self._restore_config_after_failure()
+                    await self._restore_config_after_failure()
                     raise
                 return previously_enabled == enabled
 
@@ -399,6 +473,8 @@ class RepeaterStateService:
         message: RepeatableMessage,
     ) -> RepeatAttempt | None:
         """吸收一条群消息，必要时持久化待发送的复读尝试。
+
+        连续序列计数只在内存中更新；只有命中复读或打断时才写入 pending 标记。
 
         Args:
             group_key: 消息所属群的状态键。
@@ -414,83 +490,59 @@ class RepeaterStateService:
             Exception: 状态保存失败；本次内存变更已回滚。
         """
         async with self.lock_for(group_key):
-            async with self.save_lock:
-                state = self.state_for(group_key)
-                repeat_enabled = self.is_repeat_enabled(group_key, state)
-                interrupt_enabled = self.is_interrupt_enabled(group_key, state)
-                if not repeat_enabled and not interrupt_enabled:
-                    return None
-
-                previous_message_id = state.last_message_id
-                if message_id and message_id == previous_message_id:
-                    return None
-                if message_id:
-                    state.last_message_id = message_id
-
-                fingerprint = message.fingerprint
-                if fingerprint != state.last_fingerprint:
-                    previous_fingerprint, previous_users = self._start_sequence(
-                        state,
-                        fingerprint,
-                        sender_id,
-                    )
-                    try:
-                        await self._save_locked()
-                    except (asyncio.CancelledError, Exception):
-                        self._restore_sequence(
-                            state,
-                            previous_message_id,
-                            previous_fingerprint,
-                            previous_users,
-                        )
-                        raise
-                    return None
-
-                if self._is_suppressed(state, fingerprint):
-                    return None
-
-                sender_was_counted, interrupted = self._evaluate_continuation(
-                    state,
-                    sender_id,
-                    repeat_enabled,
-                    interrupt_enabled,
-                )
-                if interrupted is not None:
-                    attempt = self._make_attempt(
-                        fingerprint,
-                        message_id,
-                        previous_message_id,
-                        sender_id,
-                        message,
-                        interrupted,
-                        repeat_user_count=len(state.repeated_users),
-                    )
-                    state.pending_fingerprints.add(fingerprint)
-                    try:
-                        await self._save_locked()
-                    except (asyncio.CancelledError, Exception):
-                        self._restore_continuation(
-                            state,
-                            fingerprint,
-                            sender_id,
-                            sender_was_counted,
-                            previous_message_id,
-                        )
-                        raise
-                    return attempt
-
-                try:
-                    await self._save_locked()
-                except (asyncio.CancelledError, Exception):
-                    self._restore_continuation(
-                        state,
-                        fingerprint,
-                        sender_id,
-                        sender_was_counted,
-                        previous_message_id,
-                    )
-                    raise
+            state = self.state_for(group_key)
+            repeat_enabled = self.is_repeat_enabled(group_key, state)
+            interrupt_enabled = self.is_interrupt_enabled(group_key, state)
+            if not repeat_enabled and not interrupt_enabled:
                 return None
+
+            previous_message_id = state.last_message_id
+            if message_id and message_id == previous_message_id:
+                return None
+            if message_id:
+                state.last_message_id = message_id
+
+            fingerprint = message.fingerprint
+            if fingerprint != state.last_fingerprint:
+                state.last_fingerprint = fingerprint
+                state.repeated_users = {sender_id}
+                return None
+
+            if self._is_suppressed(state, fingerprint, self.clock()):
+                return None
+
+            sender_was_counted, interrupted = self._evaluate_continuation(
+                state,
+                sender_id,
+                repeat_enabled,
+                interrupt_enabled,
+            )
+            if interrupted is None:
+                return None
+
+            attempt = self._make_attempt(
+                fingerprint,
+                message_id,
+                previous_message_id,
+                sender_id,
+                message,
+                interrupted,
+                repeat_user_count=len(state.repeated_users),
+            )
+            state.pending_fingerprints.add(fingerprint)
+            try:
+                async with self.save_lock:
+                    await self._save_locked()
+            except (asyncio.CancelledError, Exception):
+                self._restore_continuation(
+                    state,
+                    fingerprint,
+                    sender_id,
+                    sender_was_counted,
+                    previous_message_id,
+                )
+                raise
+            return attempt
 
     async def rollback_attempt(
         self,
@@ -528,7 +580,7 @@ class RepeaterStateService:
         group_key: str,
         attempt: RepeatAttempt,
     ) -> None:
-        """确认成功发送的尝试，并禁止相同指纹再次触发。
+        """确认成功发送的尝试，并让相同指纹进入冷却期。
 
         Args:
             group_key: 该尝试所属群的状态键。
@@ -542,10 +594,14 @@ class RepeaterStateService:
             async with self.save_lock:
                 state = self.state_for(group_key)
                 was_pending = attempt.fingerprint in state.pending_fingerprints
-                was_repeated = attempt.fingerprint in state.repeated_fingerprints
+                previous_cooldowns = dict(state.cooldowns)
                 previous_users = state.repeated_users
+                now = self.clock()
                 state.pending_fingerprints.discard(attempt.fingerprint)
-                state.repeated_fingerprints.add(attempt.fingerprint)
+                state.cooldowns[attempt.fingerprint] = (
+                    now + self.settings.repeat_cooldown_seconds
+                )
+                state.prune_cooldowns(now)
                 clears_current_sequence = state.last_fingerprint == attempt.fingerprint
                 if clears_current_sequence:
                     state.repeated_users = set()
@@ -554,11 +610,80 @@ class RepeaterStateService:
                 except (asyncio.CancelledError, Exception):
                     if was_pending:
                         state.pending_fingerprints.add(attempt.fingerprint)
-                    if not was_repeated:
-                        state.repeated_fingerprints.discard(attempt.fingerprint)
+                    state.cooldowns = previous_cooldowns
                     if clears_current_sequence:
                         state.repeated_users = previous_users
                     raise
+
+    def proxy_mute_source_for(self, group_key: str) -> str | None:
+        """无锁读取待兑现顶替禁言的来源群管名称，不分配群状态。
+
+        Args:
+            group_key: 要检查的群状态键。
+
+        Returns:
+            免于禁言的群管名称；该群没有待兑现顶替禁言时为 None。
+        """
+        state = self.group_states.get(group_key)
+        return None if state is None else state.proxy_mute_source
+
+    async def arm_proxy_mute(self, group_key: str, source_name: str) -> bool:
+        """登记一次待兑现的顶替禁言并持久化。
+
+        同一群同时最多保留一次待兑现顶替禁言，已有登记时不覆盖。
+
+        Args:
+            group_key: 顶替禁言所属群的状态键。
+            source_name: 免于禁言的群管名称，用于提示文案。
+
+        Returns:
+            本次是否新登记；已有待兑现顶替禁言时为 False。
+
+        Raises:
+            asyncio.CancelledError: 状态保存过程中协程被取消。
+            Exception: 状态保存失败；内存状态已恢复到登记前。
+        """
+        async with self.lock_for(group_key):
+            async with self.save_lock:
+                state = self.state_for(group_key)
+                if state.proxy_mute_source is not None:
+                    return False
+                state.proxy_mute_source = source_name
+                try:
+                    await self._save_locked()
+                except (asyncio.CancelledError, Exception):
+                    state.proxy_mute_source = None
+                    raise
+                return True
+
+    async def claim_proxy_mute(self, group_key: str) -> str | None:
+        """原子领取并清除待兑现的顶替禁言。
+
+        领取即作废登记，并发消息中只有一个调用能领取成功。
+
+        Args:
+            group_key: 顶替禁言所属群的状态键。
+
+        Returns:
+            免于禁言的群管名称；没有待兑现顶替禁言时为 None。
+
+        Raises:
+            asyncio.CancelledError: 状态保存过程中协程被取消。
+            Exception: 状态保存失败；内存状态已恢复到领取前。
+        """
+        async with self.lock_for(group_key):
+            async with self.save_lock:
+                state = self.group_states.get(group_key)
+                if state is None or state.proxy_mute_source is None:
+                    return None
+                source_name = state.proxy_mute_source
+                state.proxy_mute_source = None
+                try:
+                    await self._save_locked()
+                except (asyncio.CancelledError, Exception):
+                    state.proxy_mute_source = source_name
+                    raise
+                return source_name
 
     async def save(self) -> None:
         """在全局保存锁内持久化所有群状态快照。"""
@@ -603,36 +728,15 @@ class RepeaterStateService:
         ) or self.is_interrupt_enabled(group_key, state)
 
     @staticmethod
-    def _start_sequence(
+    def _is_suppressed(
         state: GroupRepeaterState,
         fingerprint: str,
-        sender_id: str,
-    ) -> tuple[str, set[str]]:
-        """开始新的连续消息序列，并返回供失败恢复的旧状态。"""
-        previous_fingerprint = state.last_fingerprint
-        previous_users = state.repeated_users
-        state.last_fingerprint = fingerprint
-        state.repeated_users = {sender_id}
-        return previous_fingerprint, previous_users
-
-    @staticmethod
-    def _restore_sequence(
-        state: GroupRepeaterState,
-        previous_message_id: str,
-        previous_fingerprint: str,
-        previous_users: set[str],
-    ) -> None:
-        """恢复新序列保存失败前的状态。"""
-        state.last_message_id = previous_message_id
-        state.last_fingerprint = previous_fingerprint
-        state.repeated_users = previous_users
-
-    @staticmethod
-    def _is_suppressed(state: GroupRepeaterState, fingerprint: str) -> bool:
-        """判断指纹是否已经完成或仍在待确认发送中。"""
+        now: float,
+    ) -> bool:
+        """判断指纹是否仍在冷却期内或仍在待确认发送中。"""
         return (
-            fingerprint in state.repeated_fingerprints
-            or fingerprint in state.pending_fingerprints
+            fingerprint in state.pending_fingerprints
+            or state.cooldowns.get(fingerprint, 0.0) > now
         )
 
     def _evaluate_continuation(
@@ -718,7 +822,9 @@ class RepeaterStateService:
         调用方必须已持有 save_lock。
         """
         payload = {
-            group_key: state.to_dict() for group_key, state in self.group_states.items()
+            group_key: state.to_dict()
+            for group_key, state in self.group_states.items()
+            if state.has_persistent_data()
         }
         await self._save_states(payload)
 
@@ -727,16 +833,16 @@ class RepeaterStateService:
 
         调用方必须已持有群锁及 save_lock。
         """
-        self.settings.save_config()
+        await self.settings.save_config()
         await self._save_locked()
 
-    def _restore_config_after_failure(self) -> None:
+    async def _restore_config_after_failure(self) -> None:
         """尽力将配置对象恢复到内存回滚后的禁用群列表。
 
         配置恢复失败只记录异常，避免覆盖原始保存失败。
         """
         try:
-            self.settings.save_config()
+            await self.settings.save_config()
         except Exception:
             self._exception("[repeater] 插件配置回滚保存失败")
 

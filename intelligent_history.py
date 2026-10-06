@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -111,6 +112,7 @@ class IntelligentHistoryStore:
         self._local_timezone = local_timezone
         self._lock = asyncio.Lock()
         self._initialized = False
+        self._last_ids: dict[Path, int] = {}
 
     async def initialize(self) -> int:
         """Create the data directory and remove strictly expired records."""
@@ -297,15 +299,28 @@ class IntelligentHistoryStore:
         return self._purge_sync(now_ms - RETENTION_MS)
 
     def _append_sync(self, record: IntelligentActionRecord) -> IntelligentActionRecord:
+        """Append one line; a failed write truncates the file back to its old size."""
         path = self._record_path(record.occurred_at_ms)
         path.parent.mkdir(parents=True, exist_ok=True)
-        existing = self._read_records_sync(path) if path.exists() else []
-        persisted = replace(
-            record,
-            id=self._next_record_id(record.occurred_at_ms, existing),
-        )
-        existing.append(persisted)
-        self._rewrite_records_sync(path, existing)
+        last_id = self._last_ids.get(path)
+        if last_id is None:
+            existing = self._read_records_sync(path) if path.exists() else []
+            last_id = self._next_record_id(record.occurred_at_ms, existing) - 1
+        persisted = replace(record, id=last_id + 1)
+        payload = (self._serialize_record(persisted) + "\n").encode("utf-8")
+        try:
+            with path.open("ab") as output:
+                original_size = output.tell()
+                try:
+                    output.write(payload)
+                    output.flush()
+                    os.fsync(output.fileno())
+                except OSError:
+                    output.truncate(original_size)
+                    raise
+        except OSError as exc:
+            raise HistoryStorageError(f"unable to append {path.name}") from exc
+        self._last_ids[path] = last_id + 1
         return persisted
 
     def _query_sync(
@@ -343,6 +358,7 @@ class IntelligentHistoryStore:
         return summary, matching[offset : offset + page_size]
 
     def _clear_sync(self) -> int:
+        self._last_ids.clear()
         deleted = 0
         for path in self._history_paths():
             deleted += len(self._read_records_sync(path))
@@ -358,6 +374,7 @@ class IntelligentHistoryStore:
             ]
             deleted += len(records) - len(retained)
             if not retained:
+                self._last_ids.pop(path, None)
                 self._delete_file_sync(path)
             elif len(retained) != len(records):
                 self._rewrite_records_sync(path, retained)
