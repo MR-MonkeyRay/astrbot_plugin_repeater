@@ -1,5 +1,7 @@
 """复读插件的配置验证与运行时策略。"""
 
+import asyncio
+import inspect
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
@@ -20,6 +22,13 @@ INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT = "astrbot"
 INTELLIGENT_INTERRUPT_PROVIDER_MODE_OPENAI_COMPATIBLE = "openai_compatible"
 INTELLIGENT_INTERRUPT_MANUAL_API_BASE_MAX_LENGTH = 256
 INTELLIGENT_INTERRUPT_MANUAL_API_KEY_MAX_LENGTH = 512
+
+DEFAULT_REPEAT_COOLDOWN_SECONDS = 1800
+MIN_REPEAT_COOLDOWN_SECONDS = 60
+MAX_REPEAT_COOLDOWN_SECONDS = 86400
+DEFAULT_LLM_TIMEOUT_SECONDS = 15
+MIN_LLM_TIMEOUT_SECONDS = 1
+MAX_LLM_TIMEOUT_SECONDS = 120
 
 CONFIG_SECTION_REPEAT = "repeat"
 CONFIG_SECTION_INTERRUPT = "interrupt"
@@ -71,8 +80,12 @@ class RepeaterSettings:
     intelligent_interrupt_mute_enabled: bool
     intelligent_interrupt_mute_prompt: str
 
-    def save_config(self) -> None:
-        """将群级开关写回分组配置，并触发配置对象的保存钩子。"""
+    # 有默认值的字段放在末尾，便于直接构造设置对象
+    repeat_cooldown_seconds: int = DEFAULT_REPEAT_COOLDOWN_SECONDS
+    intelligent_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
+
+    async def save_config(self) -> None:
+        """将群级开关写回分组配置并持久化。"""
         repeat_config = self.config.get(CONFIG_SECTION_REPEAT)
         if not isinstance(repeat_config, dict):
             repeat_config = {}
@@ -93,9 +106,53 @@ class RepeaterSettings:
         mute_config["disabled_group_ids"] = sorted(
             self.interrupt_mute_disabled_group_ids,
         )
-        save_config = getattr(self.config, "save_config", None)
-        if callable(save_config):
-            save_config()
+        await persist_config(
+            self.config,
+            {
+                CONFIG_SECTION_REPEAT: repeat_config,
+                CONFIG_SECTION_INTERRUPT: interrupt_config,
+                CONFIG_SECTION_MUTE: mute_config,
+            },
+        )
+
+
+async def persist_config(config: Any, updates: dict[str, Any]) -> None:
+    """通过 AstrBotConfig 的公开接口合并并保存配置。
+
+    ``save_config_async`` 会在锁内合并 ``updates`` 并在线程中写盘；返回 False
+    仅表示更新的快照已经取代本次快照，而更新快照同样包含本次合并的内容，
+    因此无需回滚。保存一旦开始，即使调用方被取消也会等待写盘结束再传播取消，
+    避免内存配置与磁盘状态不一致。
+
+    Args:
+        config: 插件配置对象；普通 dict 时只合并内存。
+        updates: 要合并的顶层配置分组。
+    """
+    save_config_async = getattr(config, "save_config_async", None)
+    if callable(save_config_async):
+        await _await_settled(save_config_async(updates))
+        return
+    config.update(updates)
+    save_config = getattr(config, "save_config", None)
+    if callable(save_config):
+        result = save_config()
+        if inspect.isawaitable(result):
+            await _await_settled(result)
+
+
+async def _await_settled(awaitable: Any) -> Any:
+    """等待已开始的保存结束；期间收到的取消在结束后重新抛出。"""
+    task = asyncio.ensure_future(awaitable)
+    was_cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            was_cancelled = True
+    result = task.result()
+    if was_cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def _config_section(
@@ -155,6 +212,14 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         repeat_config.get("probability", 0.3),
         "repeat.probability",
         0.3,
+        logger,
+    )
+    repeat_cooldown_seconds = _validated_bounded_integer(
+        repeat_config.get("cooldown_seconds", DEFAULT_REPEAT_COOLDOWN_SECONDS),
+        "repeat.cooldown_seconds",
+        DEFAULT_REPEAT_COOLDOWN_SECONDS,
+        MIN_REPEAT_COOLDOWN_SECONDS,
+        MAX_REPEAT_COOLDOWN_SECONDS,
         logger,
     )
 
@@ -260,6 +325,17 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         "intelligent_provider.model",
         logger,
     )
+    intelligent_timeout_seconds = _validated_bounded_integer(
+        intelligent_provider_config.get(
+            "timeout_seconds",
+            DEFAULT_LLM_TIMEOUT_SECONDS,
+        ),
+        "intelligent_provider.timeout_seconds",
+        DEFAULT_LLM_TIMEOUT_SECONDS,
+        MIN_LLM_TIMEOUT_SECONDS,
+        MAX_LLM_TIMEOUT_SECONDS,
+        logger,
+    )
 
     # 智能打断
     intelligent_interrupt_enabled = _validated_bool(
@@ -323,6 +399,8 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         intelligent_interrupt_prompt=intelligent_interrupt_prompt,
         intelligent_interrupt_mute_enabled=intelligent_interrupt_mute_enabled,
         intelligent_interrupt_mute_prompt=intelligent_interrupt_mute_prompt,
+        repeat_cooldown_seconds=repeat_cooldown_seconds,
+        intelligent_timeout_seconds=intelligent_timeout_seconds,
     )
 
 
@@ -467,11 +545,26 @@ def _validated_required_text(
     return default
 
 
-def _validated_duration(value: Any, field_name: str, default: int, logger: Any) -> int:
-    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 3600:
+def _validated_bounded_integer(
+    value: Any,
+    field_name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+    logger: Any,
+) -> int:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and minimum <= value <= maximum
+    ):
         return value
     logger.warning(f"[repeater] {field_name} 非法({value})，回退为 {default}")
     return default
+
+
+def _validated_duration(value: Any, field_name: str, default: int, logger: Any) -> int:
+    return _validated_bounded_integer(value, field_name, default, 1, 3600, logger)
 
 
 def _validated_texts(

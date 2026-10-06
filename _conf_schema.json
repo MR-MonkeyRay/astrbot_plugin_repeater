@@ -30,6 +30,13 @@
         "slider": {"min": 0, "max": 1, "step": 0.01},
         "description": "复读概率",
         "hint": "达到最小复读触发人数且未命中打断时，回发原消息的概率（0%–100%）。"
+      },
+      "cooldown_seconds": {
+        "type": "int",
+        "default": 1800,
+        "slider": {"min": 60, "max": 86400, "step": 60},
+        "description": "同内容冷却时长",
+        "hint": "同一内容被复读或打断后，需等待多少秒才能再次触发；普通复读与打断共用。"
       }
     }
   },
@@ -171,6 +178,13 @@
         "default": "",
         "description": "自定义模型 ID",
         "hint": "AstrBot 模式通常留空，插件不覆盖聊天供应商的模型；OpenAI 兼容直连模式必须填写自定义模型 ID。"
+      },
+      "timeout_seconds": {
+        "type": "int",
+        "default": 15,
+        "slider": {"min": 1, "max": 120, "step": 1},
+        "description": "LLM调用超时",
+        "hint": "单次智能打断或智能禁言提示生成的最长等待秒数；超时后使用静态文案。"
       }
     }
   },
