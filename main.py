@@ -6,6 +6,7 @@
 
 import asyncio
 import random
+import re
 import time
 from typing import Literal
 
@@ -24,6 +25,7 @@ if __package__:
         IntelligentTextClient,
         build_interrupt_prompt,
         build_mute_prompt,
+        build_proxy_mute_prompt,
     )
     from .repeater_config import RepeaterSettings, build_settings
     from .repeater_messages import RepeatableMessage, repeatable_message
@@ -37,6 +39,7 @@ else:
         IntelligentTextClient,
         build_interrupt_prompt,
         build_mute_prompt,
+        build_proxy_mute_prompt,
     )
     from repeater_config import RepeaterSettings, build_settings
     from repeater_messages import RepeatableMessage, repeatable_message
@@ -54,6 +57,23 @@ PERMISSION_ERROR = (
 PLUGIN_NAME = "astrbot_plugin_repeater"
 HISTORY_CLEANUP_INTERVAL_SECONDS = 60 * 60
 MUTE_SUPPORTED_PLATFORM = "aiocqhttp"
+MUTE_TEXT_PLACEHOLDER = re.compile(r"\{(user|time|admin)\}")
+
+
+def _fill_mute_text(template: str, values: dict[str, str]) -> str:
+    """一次性替换禁言文案占位符，避免用户名中的占位符被二次替换。
+
+    Args:
+        template: 含 {user}、{time} 或 {admin} 占位符的文案。
+        values: 占位符名到替换文本的映射；缺失的占位符原样保留。
+
+    Returns:
+        替换后的文案。
+    """
+    return MUTE_TEXT_PLACEHOLDER.sub(
+        lambda match: values.get(match.group(1), match.group(0)),
+        template,
+    )
 
 
 class RepeaterPlugin(Star):
@@ -311,7 +331,30 @@ class RepeaterPlugin(Star):
         return sender_id in {str(user_id) for user_id in group.group_admins or []}
 
     @staticmethod
-    async def _is_bot_admin(event: AstrMessageEvent) -> bool:
+    async def _group_privileged_ids(event: AstrMessageEvent) -> set[str] | None:
+        """读取本群群主和群管理员的 ID。
+
+        Args:
+            event: 群消息事件。
+
+        Returns:
+            群主及群管理员 ID 集合；群信息不可用时为 None。
+        """
+        try:
+            group = await event.get_group()
+        except Exception as exc:
+            logger.warning(f"[repeater] 获取群信息失败: {exc}")
+            return None
+        if group is None:
+            logger.warning("[repeater] 获取群信息失败: 平台未返回群信息")
+            return None
+        privileged = {str(user_id) for user_id in group.group_admins or []}
+        if group.group_owner:
+            privileged.add(str(group.group_owner))
+        return privileged
+
+    @classmethod
+    async def _is_bot_admin(cls, event: AstrMessageEvent) -> bool:
         """判断 bot 是否在本群具有管理员权限。
 
         Args:
@@ -320,17 +363,8 @@ class RepeaterPlugin(Star):
         Returns:
             bot 为群主或群管理员时为 True。
         """
-        try:
-            group = await event.get_group()
-        except Exception as exc:
-            logger.warning(f"[repeater] 获取群信息失败: {exc}")
-            return False
-        if group is None:
-            return False
-        bot_id = str(event.get_self_id())
-        if bot_id == str(group.group_owner or ""):
-            return True
-        return bot_id in {str(user_id) for user_id in group.group_admins or []}
+        privileged = await cls._group_privileged_ids(event)
+        return privileged is not None and str(event.get_self_id()) in privileged
 
     def _begin_handler(self) -> asyncio.Task | None:
         """登记当前处理协程，或在终止期间拒绝它。
@@ -382,12 +416,15 @@ class RepeaterPlugin(Star):
             asyncio.CancelledError: 消息处理协程在状态保存或发送时被取消。
             Exception: 状态保存、消息发送或发送后的提交失败；仅发送失败会先回滚。
         """
-        if not event.get_group_id() or event.is_at_or_wake_command:
+        if not event.get_group_id():
             return
         if event.get_sender_id() == event.get_self_id():
             return
 
         group_key = self._group_key(event)
+        await self._redeem_proxy_mute(event, group_key)
+        if event.is_at_or_wake_command:
+            return
         if not await self.state_service.is_any_repeat_mode_enabled(group_key):
             return
 
@@ -595,49 +632,58 @@ class RepeaterPlugin(Star):
     ) -> None:
         """处理打断复读后的禁言逻辑。
 
+        命中禁言概率后，若触发用户是群主或群管理员则不禁言他，改为登记一次
+        顶替禁言，由本群下一位发言的普通成员兑现。
+
         Args:
             event: 触发打断的群消息事件。
             group_key: 群状态键。
             attempt: 已提交的打断复读尝试。
+            message: 触发打断的规范化消息。
         """
         if not self.state_service.is_interrupt_mute_enabled(group_key):
+            logger.debug(f"[repeater] {group_key} 打断复读禁言未启用，跳过")
             return
-        if event.get_platform_name() != MUTE_SUPPORTED_PLATFORM:
-            return
-        if not await self._is_bot_admin(event):
+        platform_name = event.get_platform_name()
+        if platform_name != MUTE_SUPPORTED_PLATFORM:
+            logger.debug(
+                f"[repeater] {group_key} 平台 {platform_name} 不支持禁言，跳过",
+            )
             return
 
         settings = self.state_service.settings
         if random.random() >= settings.interrupt_mute_probability:
+            logger.info(
+                f"[repeater] {group_key} 打断复读禁言未命中概率"
+                f"（{settings.interrupt_mute_probability * 100:g}%），跳过",
+            )
+            return
+
+        privileged = await self._group_privileged_ids(event)
+        if privileged is None:
+            return
+        if str(event.get_self_id()) not in privileged:
+            logger.warning(
+                f"[repeater] {group_key} 机器人不是群主或群管理员，无法执行打断复读禁言",
+            )
+            return
+
+        sender_id = str(attempt.sender_id)
+        sender_name = str(event.get_sender_name() or sender_id)
+        if sender_id in privileged:
+            await self._arm_proxy_mute(group_key, sender_id, sender_name)
             return
 
         duration = random.randint(
             settings.interrupt_mute_duration_min,
             settings.interrupt_mute_duration_max,
         )
-        try:
-            call_action = getattr(getattr(event, "bot", None), "call_action", None)
-            if not callable(call_action):
-                logger.warning(f"[repeater] {group_key} 缺少 OneBot 客户端，无法禁言")
-                return
-            payload = {
-                "group_id": int(group_key),
-                "user_id": int(attempt.sender_id),
-                "duration": duration,
-            }
-            self_id = getattr(getattr(event, "message_obj", None), "self_id", None)
-            if self_id:
-                payload["self_id"] = self_id
-            await call_action("set_group_ban", **payload)
-        except Exception as exc:
-            logger.warning(f"[repeater] {group_key} 禁言失败: {exc}")
+        if not await self._ban_group_member(event, group_key, sender_id, duration):
             return
 
-        fallback_text = random.choice(settings.interrupt_mute_texts)
-        sender_name = str(event.get_sender_name() or attempt.sender_id)
-        fallback_text = fallback_text.replace("{user}", sender_name).replace(
-            "{time}",
-            str(duration),
+        fallback_text = _fill_mute_text(
+            random.choice(settings.interrupt_mute_texts),
+            {"user": sender_name, "time": str(duration)},
         )
         mute_text = fallback_text
         if settings.intelligent_interrupt_mute_enabled:
@@ -656,9 +702,173 @@ class RepeaterPlugin(Star):
             logger.exception(f"[repeater] {group_key} 禁言提示发送失败")
 
         logger.info(
-            f"[repeater] {group_key} 打断复读禁言: 用户 {attempt.sender_id} "
-            f"禁言 {duration}s",
+            f"[repeater] {group_key} 打断复读禁言: 用户 {sender_id} 禁言 {duration}s",
         )
+
+    async def _ban_group_member(
+        self,
+        event: AstrMessageEvent,
+        group_key: str,
+        user_id: str,
+        duration: int,
+    ) -> bool:
+        """通过 OneBot 禁言一名群成员。
+
+        Args:
+            event: 提供 OneBot 客户端和路由信息的群消息事件。
+            group_key: 群状态键，即 OneBot 群号。
+            user_id: 要禁言的用户 ID。
+            duration: 禁言秒数。
+
+        Returns:
+            禁言 API 调用成功时为 True；失败已记录日志。
+        """
+        call_action = getattr(getattr(event, "bot", None), "call_action", None)
+        if not callable(call_action):
+            logger.warning(f"[repeater] {group_key} 缺少 OneBot 客户端，无法禁言")
+            return False
+        try:
+            payload = {
+                "group_id": int(group_key),
+                "user_id": int(user_id),
+                "duration": duration,
+            }
+            self_id = getattr(getattr(event, "message_obj", None), "self_id", None)
+            if self_id:
+                payload["self_id"] = self_id
+            await call_action("set_group_ban", **payload)
+        except Exception as exc:
+            logger.warning(f"[repeater] {group_key} 禁言用户 {user_id} 失败: {exc}")
+            return False
+        return True
+
+    async def _arm_proxy_mute(
+        self,
+        group_key: str,
+        sender_id: str,
+        sender_name: str,
+    ) -> None:
+        """为免于禁言的群管登记一次由下一位普通成员兑现的顶替禁言。
+
+        Args:
+            group_key: 群状态键。
+            sender_id: 免于禁言的群管 ID。
+            sender_name: 免于禁言的群管名称，用于顶替提示文案。
+        """
+        try:
+            armed = await self.state_service.arm_proxy_mute(group_key, sender_name)
+        except Exception:
+            logger.exception(f"[repeater] {group_key} 顶替禁言登记保存失败")
+            return
+        if armed:
+            logger.info(
+                f"[repeater] {group_key} 打断复读禁言目标 {sender_id} 是群主或群管理员，"
+                "免于禁言；下一位发言的普通成员将被顶替禁言",
+            )
+        else:
+            logger.info(
+                f"[repeater] {group_key} 打断复读禁言目标 {sender_id} 是群主或群管理员，"
+                "免于禁言；本群已有待兑现的顶替禁言，不再叠加",
+            )
+
+    async def _redeem_proxy_mute(
+        self,
+        event: AstrMessageEvent,
+        group_key: str,
+    ) -> None:
+        """若本群有待兑现顶替禁言，则禁言这条消息的普通成员发送者。
+
+        群主、群管理员发言不兑现。打断复读禁言已关闭、无法获取群信息、机器人
+        无权限或禁言失败时只记录日志，并作废本次顶替禁言。
+
+        Args:
+            event: 本群的一条新消息事件。
+            group_key: 群状态键。
+        """
+        if self.state_service.proxy_mute_source_for(group_key) is None:
+            return
+        if event.get_platform_name() != MUTE_SUPPORTED_PLATFORM:
+            return
+        if not (
+            self.state_service.is_interrupt_mute_enabled(group_key)
+            and await self.state_service.interrupt_enabled_for(group_key)
+        ):
+            if await self._take_proxy_mute(group_key):
+                logger.info(
+                    f"[repeater] {group_key} 打断复读禁言已关闭，丢弃待兑现的顶替禁言",
+                )
+            return
+
+        privileged = await self._group_privileged_ids(event)
+        if privileged is None:
+            if await self._take_proxy_mute(group_key):
+                logger.warning(
+                    f"[repeater] {group_key} 无法获取群信息，本次顶替禁言作废",
+                )
+            return
+        if str(event.get_self_id()) not in privileged:
+            if await self._take_proxy_mute(group_key):
+                logger.warning(
+                    f"[repeater] {group_key} 机器人不是群主或群管理员，"
+                    "本次顶替禁言作废",
+                )
+            return
+        sender_id = str(event.get_sender_id())
+        if sender_id in privileged:
+            return
+
+        source_name = await self._take_proxy_mute(group_key)
+        if source_name is None:
+            return
+        settings = self.state_service.settings
+        duration = random.randint(
+            settings.interrupt_mute_duration_min,
+            settings.interrupt_mute_duration_max,
+        )
+        if not await self._ban_group_member(event, group_key, sender_id, duration):
+            return
+
+        sender_name = str(event.get_sender_name() or sender_id)
+        fallback_text = _fill_mute_text(
+            random.choice(settings.interrupt_mute_proxy_texts),
+            {"user": sender_name, "time": str(duration), "admin": source_name},
+        )
+        proxy_text = fallback_text
+        if settings.intelligent_interrupt_mute_enabled:
+            proxy_text = await self._generate_intelligent_text(
+                event,
+                settings=settings,
+                prompt=build_proxy_mute_prompt(sender_name, source_name, duration),
+                system_prompt=settings.intelligent_proxy_mute_prompt,
+                fallback_text=fallback_text,
+                feature_name="智能顶替禁言提示",
+                history_kind="mute",
+                mute_duration_seconds=duration,
+            )
+        try:
+            await event.send(event.plain_result(proxy_text))
+        except Exception:
+            logger.exception(f"[repeater] {group_key} 顶替禁言提示发送失败")
+
+        logger.info(
+            f"[repeater] {group_key} 顶替禁言: 用户 {sender_id} 代替群管 "
+            f"{source_name} 禁言 {duration}s",
+        )
+
+    async def _take_proxy_mute(self, group_key: str) -> str | None:
+        """领取并清除本群待兑现的顶替禁言。
+
+        Args:
+            group_key: 群状态键。
+
+        Returns:
+            免于禁言的群管名称；没有待兑现顶替禁言或保存失败时为 None。
+        """
+        try:
+            return await self.state_service.claim_proxy_mute(group_key)
+        except Exception:
+            logger.exception(f"[repeater] {group_key} 顶替禁言状态保存失败")
+            return None
 
     @filter.command("自动复读", alias={"repeatMsg"})
     async def repeater_command(
@@ -763,8 +973,18 @@ class RepeaterPlugin(Star):
                         "禁言时长："
                         f"{settings.interrupt_mute_duration_min}-"
                         f"{settings.interrupt_mute_duration_max}秒\n"
-                        f"提示文本：{len(settings.interrupt_mute_texts)} 条"
+                        f"提示文本：{len(settings.interrupt_mute_texts)} 条\n"
+                        "顶替提示文本："
+                        f"{len(settings.interrupt_mute_proxy_texts)} 条"
                     )
+                    proxy_source = self.state_service.proxy_mute_source_for(
+                        group_key,
+                    )
+                    if proxy_source is not None:
+                        mute_info += (
+                            f"\n待兑现顶替禁言：{proxy_source} 免于禁言，"
+                            "下一位发言的普通成员将被禁言"
+                        )
                 else:
                     mute_info = "\n\n打断复读禁言：关闭"
                 return base_info + mute_info

@@ -1,7 +1,8 @@
 """复读状态机及其持久化发送事务。
 
 状态服务以单群锁和全局保存锁协调并发消息，确保发送前的 pending 标记和
-发送结果的提交或回滚保持一致。只有群级开关、pending 标记和冷却表会持久化；
+发送结果的提交或回滚保持一致。只有群级开关、pending 标记、冷却表和待兑现的
+顶替禁言会持久化；
 连续序列计数仅保存在内存中，未触发复读的普通消息不会写入存储。
 """
 
@@ -33,6 +34,7 @@ class GroupRepeaterState:
         interrupt_enabled_override: 打断复读的群级覆盖值；None 时使用全局默认值。
         pending_fingerprints: 已持久化但尚未确认发送结果的消息指纹。
         cooldowns: 已成功复读或打断的指纹及其冷却到期时间（Unix 秒）。
+        proxy_mute_source: 待兑现顶替禁言中免于禁言的群管名称；None 表示无待兑现。
         last_fingerprint: 当前连续消息序列的规范化指纹；仅保存在内存中。
         repeated_users: 当前序列中已经计入阈值的发送者 ID；仅保存在内存中。
         last_message_id: 最近处理的消息 ID，用于重复事件去重；仅保存在内存中。
@@ -42,6 +44,7 @@ class GroupRepeaterState:
     interrupt_enabled_override: bool | None = None
     pending_fingerprints: set[str] = field(default_factory=set)
     cooldowns: dict[str, float] = field(default_factory=dict)
+    proxy_mute_source: str | None = None
     last_fingerprint: str = ""
     repeated_users: set[str] = field(default_factory=set)
     last_message_id: str = ""
@@ -70,6 +73,7 @@ class GroupRepeaterState:
             raw_state.get("repeated_fingerprints", []),
         ):
             cooldowns.setdefault(legacy_fingerprint, legacy_cooldown_until)
+        proxy_mute_source = raw_state.get("proxy_mute_source")
         return cls(
             enabled_override=(
                 True if raw_state.get("enabled_override") is True else None
@@ -81,6 +85,9 @@ class GroupRepeaterState:
                 raw_state.get("pending_fingerprints", []),
             ),
             cooldowns=cooldowns,
+            proxy_mute_source=(
+                proxy_mute_source if isinstance(proxy_mute_source, str) else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -89,7 +96,7 @@ class GroupRepeaterState:
         Returns:
             集合已排序、可直接写入插件 KV 存储的状态字典。
         """
-        return {
+        payload: dict[str, Any] = {
             "enabled_override": self.enabled_override,
             "interrupt_enabled_override": self.interrupt_enabled_override,
             "pending_fingerprints": sorted(self.pending_fingerprints),
@@ -98,6 +105,9 @@ class GroupRepeaterState:
                 for fingerprint in sorted(self.cooldowns)
             },
         }
+        if self.proxy_mute_source is not None:
+            payload["proxy_mute_source"] = self.proxy_mute_source
+        return payload
 
     def has_persistent_data(self) -> bool:
         """返回该群是否有需要写入存储的状态。"""
@@ -106,6 +116,7 @@ class GroupRepeaterState:
             or self.interrupt_enabled_override is not None
             or self.pending_fingerprints
             or self.cooldowns
+            or self.proxy_mute_source is not None
         )
 
     def prune_cooldowns(self, now: float) -> None:
@@ -603,6 +614,76 @@ class RepeaterStateService:
                     if clears_current_sequence:
                         state.repeated_users = previous_users
                     raise
+
+    def proxy_mute_source_for(self, group_key: str) -> str | None:
+        """无锁读取待兑现顶替禁言的来源群管名称，不分配群状态。
+
+        Args:
+            group_key: 要检查的群状态键。
+
+        Returns:
+            免于禁言的群管名称；该群没有待兑现顶替禁言时为 None。
+        """
+        state = self.group_states.get(group_key)
+        return None if state is None else state.proxy_mute_source
+
+    async def arm_proxy_mute(self, group_key: str, source_name: str) -> bool:
+        """登记一次待兑现的顶替禁言并持久化。
+
+        同一群同时最多保留一次待兑现顶替禁言，已有登记时不覆盖。
+
+        Args:
+            group_key: 顶替禁言所属群的状态键。
+            source_name: 免于禁言的群管名称，用于提示文案。
+
+        Returns:
+            本次是否新登记；已有待兑现顶替禁言时为 False。
+
+        Raises:
+            asyncio.CancelledError: 状态保存过程中协程被取消。
+            Exception: 状态保存失败；内存状态已恢复到登记前。
+        """
+        async with self.lock_for(group_key):
+            async with self.save_lock:
+                state = self.state_for(group_key)
+                if state.proxy_mute_source is not None:
+                    return False
+                state.proxy_mute_source = source_name
+                try:
+                    await self._save_locked()
+                except (asyncio.CancelledError, Exception):
+                    state.proxy_mute_source = None
+                    raise
+                return True
+
+    async def claim_proxy_mute(self, group_key: str) -> str | None:
+        """原子领取并清除待兑现的顶替禁言。
+
+        领取即作废登记，并发消息中只有一个调用能领取成功。
+
+        Args:
+            group_key: 顶替禁言所属群的状态键。
+
+        Returns:
+            免于禁言的群管名称；没有待兑现顶替禁言时为 None。
+
+        Raises:
+            asyncio.CancelledError: 状态保存过程中协程被取消。
+            Exception: 状态保存失败；内存状态已恢复到领取前。
+        """
+        async with self.lock_for(group_key):
+            async with self.save_lock:
+                state = self.group_states.get(group_key)
+                if state is None or state.proxy_mute_source is None:
+                    return None
+                source_name = state.proxy_mute_source
+                state.proxy_mute_source = None
+                try:
+                    await self._save_locked()
+                except (asyncio.CancelledError, Exception):
+                    state.proxy_mute_source = source_name
+                    raise
+                return source_name
 
     async def save(self) -> None:
         """在全局保存锁内持久化所有群状态快照。"""

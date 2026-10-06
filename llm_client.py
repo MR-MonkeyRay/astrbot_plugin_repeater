@@ -81,6 +81,19 @@ def build_mute_prompt(sender_name: str, duration: int) -> str:
     )
 
 
+def build_proxy_mute_prompt(
+    scapegoat_name: str,
+    admin_name: str,
+    duration: int,
+) -> str:
+    """Build the user prompt for one intelligent scapegoat mute notice."""
+    return (
+        f"替罪羊（被顶替禁言的群友）：{_clip(scapegoat_name, MAX_PROMPT_NAME_LENGTH)}\n"
+        f"免于禁言的群管：{_clip(admin_name, MAX_PROMPT_NAME_LENGTH)}\n"
+        f"禁言时长：{duration}秒"
+    )
+
+
 class IntelligentTextClient:
     """Generate one short group-chat text through the configured LLM provider."""
 

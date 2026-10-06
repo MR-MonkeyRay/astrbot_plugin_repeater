@@ -23,6 +23,7 @@ from astrbot.api.provider import LLMResponse
 from llm_client import build_interrupt_prompt
 from main import MANUAL_OPENAI_COMPATIBLE_PROVIDER_ID, PERMISSION_ERROR, RepeaterPlugin
 from repeater_config import (
+    DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT,
     DEFAULT_INTERRUPT_MUTE_TEXT,
     DEFAULT_INTERRUPT_TEXT,
     DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
@@ -78,6 +79,7 @@ class ConfigSchemaTest(unittest.TestCase):
                 "duration_min",
                 "duration_max",
                 "texts",
+                "proxy_texts",
             ],
             "intelligent_provider": [
                 "mode",
@@ -88,7 +90,7 @@ class ConfigSchemaTest(unittest.TestCase):
                 "timeout_seconds",
             ],
             "intelligent_interrupt": ["enabled", "prompt"],
-            "intelligent_mute": ["enabled", "prompt"],
+            "intelligent_mute": ["enabled", "prompt", "proxy_prompt"],
         }
 
         self.assertEqual(list(schema), list(expected_sections))
@@ -194,6 +196,10 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertEqual(
             intelligent_mute["prompt"]["default"],
             DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT,
+        )
+        self.assertEqual(
+            intelligent_mute["proxy_prompt"]["default"],
+            DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT,
         )
 
     def test_every_leaf_field_is_descriptive_and_has_a_default(self) -> None:
@@ -524,6 +530,80 @@ class FakeBot:
 
     async def call_action(self, action: str, **payload: object) -> None:
         self.actions.append((action, payload))
+
+
+class FailingBot(FakeBot):
+    async def call_action(self, action: str, **payload: object) -> None:
+        self.actions.append((action, payload))
+        raise RuntimeError("ban failed")
+
+
+PROXY_MUTE_TEST_CONFIG = {
+    "repeat": {"threshold": 3},
+    "interrupt": {
+        "default_enabled": True,
+        "probability": 1.0,
+        "texts": ["打断！"],
+    },
+    "mute": {
+        "enabled": True,
+        "probability": 1.0,
+        "duration_min": 30,
+        "duration_max": 30,
+        "texts": ["{user} 被禁言 {time}s"],
+        "proxy_texts": ["{admin} 免罪，{user} 顶替禁言 {time}s"],
+    },
+}
+
+
+async def interrupt_by_group_admin(
+    plugin: RepeaterPlugin,
+    group_id: str,
+    bot: object,
+) -> "FakeEvent":
+    """Drive a three-user chain whose interrupting sender is a group admin."""
+    events = [
+        FakeEvent(group_id, "111", "复读内容", "1", bot=bot, group_admins=["bot"]),
+        FakeEvent(group_id, "222", "复读内容", "2", bot=bot, group_admins=["bot"]),
+        FakeEvent(
+            group_id,
+            "12345",
+            "复读内容",
+            "3",
+            bot=bot,
+            sender_name="群管",
+            self_id="bot",
+            group_admins=["bot", "12345"],
+        ),
+    ]
+    with (
+        patch("repeater_service.random.random", return_value=0.0),
+        patch("main.random.random", return_value=0.0),
+    ):
+        for event in events:
+            await plugin.on_group_message(event)
+    return events[-1]
+
+
+def member_event(
+    group_id: str,
+    sender_id: str,
+    message_id: str,
+    bot: object,
+    *,
+    sender_name: str | None = None,
+    admins: tuple[str, ...] = ("bot", "12345"),
+) -> "FakeEvent":
+    return FakeEvent(
+        group_id,
+        sender_id,
+        f"随便聊聊 {message_id}",
+        message_id,
+        bot=bot,
+        sender_name=sender_name,
+        self_id="bot",
+        group_admins=list(admins),
+    )
 
 
 class FakeContext:
@@ -1031,6 +1111,22 @@ class GroupRepeaterStateSerializationTest(unittest.TestCase):
                 "pending_fingerprints": ["3", "pending-a", "pending-z"],
                 "cooldowns": {"repeat-a": 100.0, "repeat-z": 200.0},
             },
+        )
+
+    def test_pending_proxy_mute_round_trips(self) -> None:
+        restored = GroupRepeaterState.from_dict(
+            {"cooldowns": {}, "proxy_mute_source": "群管"},
+            legacy_cooldown_until=0,
+        )
+
+        self.assertEqual(restored.proxy_mute_source, "群管")
+        self.assertTrue(restored.has_persistent_data())
+        self.assertEqual(restored.to_dict()["proxy_mute_source"], "群管")
+        self.assertIsNone(
+            GroupRepeaterState.from_dict(
+                {"cooldowns": {}, "proxy_mute_source": 1},
+                legacy_cooldown_until=0,
+            ).proxy_mute_source,
         )
 
     def test_legacy_permanent_suppression_migrates_to_cooldown(self) -> None:
@@ -1695,6 +1791,237 @@ class RepeaterPluginTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interrupter.stopped)
         self.assertIn(fingerprint, state.cooldowns)
         self.assertNotIn(fingerprint, state.pending_fingerprints)
+
+    async def test_group_admin_interrupter_arms_proxy_mute_for_next_member(
+        self,
+    ) -> None:
+        bot = FakeBot()
+        store: dict = {}
+        plugin = MemoryRepeater(store, PROXY_MUTE_TEST_CONFIG)
+        await plugin.initialize()
+
+        interrupter = await interrupt_by_group_admin(plugin, "10010", bot)
+
+        self.assertEqual(interrupter.sent, ["打断！"])
+        self.assertEqual(bot.actions, [])
+        self.assertEqual(
+            plugin.state_service.proxy_mute_source_for("10010"),
+            "群管",
+        )
+        self.assertEqual(
+            store["group_states"]["10010"]["proxy_mute_source"],
+            "群管",
+        )
+
+        owner = FakeEvent(
+            "10010",
+            "99999",
+            "群主发言",
+            "4",
+            bot=bot,
+            self_id="bot",
+            group_owner="99999",
+            group_admins=["bot"],
+        )
+        admin = member_event("10010", "12345", "5", bot)
+        member = member_event("10010", "67890", "6", bot, sender_name="路人")
+        later_member = member_event("10010", "67891", "7", bot)
+        await plugin.on_group_message(owner)
+        await plugin.on_group_message(admin)
+        with patch("main.random.random", return_value=0.99):
+            await plugin.on_group_message(member)
+            await plugin.on_group_message(later_member)
+
+        self.assertEqual(owner.sent, [])
+        self.assertEqual(admin.sent, [])
+        self.assertEqual(member.sent, ["群管 免罪，路人 顶替禁言 30s"])
+        self.assertEqual(later_member.sent, [])
+        self.assertEqual(
+            bot.actions,
+            [
+                (
+                    "set_group_ban",
+                    {
+                        "group_id": 10010,
+                        "user_id": 67890,
+                        "duration": 30,
+                        "self_id": "bot",
+                    },
+                ),
+            ],
+        )
+        self.assertIsNone(plugin.state_service.proxy_mute_source_for("10010"))
+        self.assertNotIn("proxy_mute_source", store["group_states"]["10010"])
+
+    async def test_proxy_mute_does_not_stack_and_survives_restart(self) -> None:
+        bot = FakeBot()
+        store: dict = {}
+        plugin = MemoryRepeater(store, PROXY_MUTE_TEST_CONFIG)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10011", bot)
+        self.assertFalse(
+            await plugin.state_service.arm_proxy_mute("10011", "另一位群管"),
+        )
+        await plugin.terminate()
+
+        restarted = MemoryRepeater(store, PROXY_MUTE_TEST_CONFIG)
+        await restarted.initialize()
+        first = member_event("10011", "67890", "10", bot, sender_name="甲")
+        second = member_event("10011", "67891", "11", bot, sender_name="乙")
+        await restarted.on_group_message(first)
+        await restarted.on_group_message(second)
+
+        self.assertEqual(first.sent, ["群管 免罪，甲 顶替禁言 30s"])
+        self.assertEqual(second.sent, [])
+        self.assertEqual([action for action, _ in bot.actions], ["set_group_ban"])
+
+    async def test_concurrent_members_redeem_proxy_mute_once(self) -> None:
+        bot = FakeBot()
+        plugin = MemoryRepeater({}, PROXY_MUTE_TEST_CONFIG, put_delay=0.01)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10012", bot)
+
+        members = [
+            member_event("10012", sender_id, message_id, bot)
+            for sender_id, message_id in (("67890", "20"), ("67891", "21"))
+        ]
+        await asyncio.gather(*(plugin.on_group_message(event) for event in members))
+
+        self.assertEqual(sum(len(event.sent) for event in members), 1)
+        self.assertEqual(len(bot.actions), 1)
+        self.assertIsNone(plugin.state_service.proxy_mute_source_for("10012"))
+
+    async def test_failed_proxy_ban_only_warns_and_discards(self) -> None:
+        plugin = MemoryRepeater({}, PROXY_MUTE_TEST_CONFIG)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10013", FakeBot())
+
+        failing_bot = FailingBot()
+        first = member_event("10013", "67890", "30", failing_bot)
+        second = member_event("10013", "67891", "31", failing_bot)
+        with patch("main.logger.warning") as warning:
+            await plugin.on_group_message(first)
+            await plugin.on_group_message(second)
+
+        self.assertEqual(first.sent, [])
+        self.assertEqual(second.sent, [])
+        self.assertEqual(len(failing_bot.actions), 1)
+        self.assertIsNone(plugin.state_service.proxy_mute_source_for("10013"))
+        warning.assert_called_once_with(
+            "[repeater] 10013 禁言用户 67890 失败: ban failed",
+        )
+
+    async def test_proxy_mute_discards_when_bot_lost_admin(self) -> None:
+        plugin = MemoryRepeater({}, PROXY_MUTE_TEST_CONFIG)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10016", FakeBot())
+
+        bot = FakeBot()
+        member = member_event("10016", "67890", "60", bot, admins=("12345",))
+        await plugin.on_group_message(member)
+
+        self.assertEqual(member.sent, [])
+        self.assertEqual(bot.actions, [])
+        self.assertIsNone(plugin.state_service.proxy_mute_source_for("10016"))
+
+    async def test_disabled_mute_neither_arms_nor_redeems_proxy_mute(self) -> None:
+        disabled_config = copy.deepcopy(PROXY_MUTE_TEST_CONFIG)
+        disabled_config["mute"]["enabled"] = False
+        bot = FakeBot()
+        plugin = MemoryRepeater({}, disabled_config)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10014", bot)
+
+        self.assertIsNone(plugin.state_service.proxy_mute_source_for("10014"))
+
+        store: dict = {}
+        enabled = MemoryRepeater(store, PROXY_MUTE_TEST_CONFIG)
+        await enabled.initialize()
+        await interrupt_by_group_admin(enabled, "10014", bot)
+        await enabled.terminate()
+        restarted = MemoryRepeater(store, disabled_config)
+        await restarted.initialize()
+        first = member_event("10014", "67890", "40", bot)
+        await restarted.on_group_message(first)
+
+        self.assertEqual(first.sent, [])
+        self.assertEqual(bot.actions, [])
+        self.assertIsNone(restarted.state_service.proxy_mute_source_for("10014"))
+        self.assertNotIn("proxy_mute_source", store["group_states"]["10014"])
+
+    async def test_intelligent_proxy_mute_notice_uses_scapegoat_prompt(self) -> None:
+        bot = FakeBot()
+        context = FakeContext(
+            response=LLMResponse("assistant", completion_text="替罪羊播报"),
+        )
+        config = copy.deepcopy(PROXY_MUTE_TEST_CONFIG)
+        config["intelligent_provider"] = {
+            "provider_id": "provider-a",
+            "model": "model-b",
+        }
+        config["intelligent_mute"] = {"enabled": True}
+        plugin = MemoryRepeater({}, config, context=context)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10017", bot)
+
+        member = member_event("10017", "67890", "70", bot, sender_name="路人")
+        await plugin.on_group_message(member)
+
+        self.assertEqual(member.sent, ["替罪羊播报"])
+        self.assertEqual(len(bot.actions), 1)
+        self.assertEqual(
+            context.llm_calls,
+            [
+                {
+                    "chat_provider_id": "provider-a",
+                    "prompt": (
+                        "替罪羊（被顶替禁言的群友）：路人\n"
+                        "免于禁言的群管：群管\n"
+                        "禁言时长：30秒"
+                    ),
+                    "system_prompt": DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT,
+                    "kwargs": {"model": "model-b"},
+                },
+            ],
+        )
+
+    async def test_intelligent_proxy_mute_notice_falls_back_to_static_text(
+        self,
+    ) -> None:
+        bot = FakeBot()
+        context = FakeContext(llm_error=RuntimeError("llm down"))
+        config = copy.deepcopy(PROXY_MUTE_TEST_CONFIG)
+        config["intelligent_provider"] = {"provider_id": "provider-a"}
+        config["intelligent_mute"] = {
+            "enabled": True,
+            "proxy_prompt": " 自定义顶替提示词 ",
+        }
+        plugin = MemoryRepeater({}, config, context=context)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10018", bot)
+
+        member = member_event("10018", "67890", "80", bot, sender_name="路人")
+        await plugin.on_group_message(member)
+
+        self.assertEqual(member.sent, ["群管 免罪，路人 顶替禁言 30s"])
+        self.assertEqual(
+            context.llm_calls[0]["system_prompt"],
+            "自定义顶替提示词",
+        )
+
+    async def test_interrupt_status_shows_pending_proxy_mute(self) -> None:
+        plugin = MemoryRepeater({}, PROXY_MUTE_TEST_CONFIG)
+        await plugin.initialize()
+        await interrupt_by_group_admin(plugin, "10015", FakeBot())
+
+        reply = await run_interrupt_command(
+            plugin,
+            FakeEvent("10015", "member", "", "50"),
+            "查看",
+        )
+
+        self.assertIn("顶替提示文本：1 条", reply[0])
+        self.assertIn("待兑现顶替禁言：群管 免于禁言", reply[0])
 
     async def test_intelligent_interrupt_mute_uses_shared_provider_and_model(
         self,
@@ -4528,6 +4855,9 @@ class IntelligentConsoleApiTest(unittest.IsolatedAsyncioTestCase):
                 self.messages.append(message)
 
             def info(self, message: str) -> None:
+                self.messages.append(message)
+
+            def debug(self, message: str) -> None:
                 self.messages.append(message)
 
         api_key = "manual-api-key-that-must-not-be-echoed"

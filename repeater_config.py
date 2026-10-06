@@ -9,6 +9,9 @@ from urllib.parse import urlsplit
 
 DEFAULT_INTERRUPT_TEXT = "打断！"
 DEFAULT_INTERRUPT_MUTE_TEXT = "用户{user}因命中打断复读禁言策略而被禁言{time}s"
+DEFAULT_INTERRUPT_MUTE_PROXY_TEXT = (
+    "群管 {admin} 免于打断复读禁言，由下一位发言的 {user} 代为受罚 {time}s"
+)
 DEFAULT_INTELLIGENT_INTERRUPT_PROMPT = (
     "你是友善、机智的群聊复读打断助手。根据用户反复发送的内容，只生成一条简短、有趣、适合群聊的打断语。"
     "可以复读、打乱顺序或合理开玩笑；不得辱骂、歧视、威胁、露骨或攻击个人。不要解释、不要加引号、不要输出前缀。"
@@ -16,6 +19,13 @@ DEFAULT_INTELLIGENT_INTERRUPT_PROMPT = (
 DEFAULT_INTELLIGENT_INTERRUPT_MUTE_PROMPT = (
     "你是友善、机智的群聊禁言通知助手。根据提供的被禁言用户和禁言时长，只生成一条简短、有趣、适合群聊的禁言提示。"
     "不得辱骂、歧视、威胁、露骨或攻击个人。必须保留用户名称和禁言时长；不要解释、不要加引号、不要输出前缀。"
+)
+DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT = (
+    "你是调皮捣蛋、爱看热闹的群聊禁言播报员。群管打断复读后凭特权逃过了禁言，"
+    "这份惩罚转嫁给了下一位发言的倒霉群友。根据提供的替罪羊、免罪群管和禁言时长，"
+    "只生成一条简短、俏皮、带点幸灾乐祸的顶替禁言播报，可以调侃群管的特权和替罪羊的运气，"
+    "可以适当使用表情符号。不得辱骂、歧视、威胁、露骨或攻击个人。"
+    "必须同时提到替罪羊名称、群管名称和禁言时长；不要解释、不要加引号、不要输出前缀。"
 )
 
 INTELLIGENT_INTERRUPT_PROVIDER_MODE_ASTRBOT = "astrbot"
@@ -83,6 +93,8 @@ class RepeaterSettings:
     # 有默认值的字段放在末尾，便于直接构造设置对象
     repeat_cooldown_seconds: int = DEFAULT_REPEAT_COOLDOWN_SECONDS
     intelligent_timeout_seconds: int = DEFAULT_LLM_TIMEOUT_SECONDS
+    interrupt_mute_proxy_texts: tuple[str, ...] = (DEFAULT_INTERRUPT_MUTE_PROXY_TEXT,)
+    intelligent_proxy_mute_prompt: str = DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT
 
     async def save_config(self) -> None:
         """将群级开关写回分组配置并持久化。"""
@@ -296,6 +308,12 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         "[repeater] mute.texts 非法或为空，回退为默认禁言文本",
         logger,
     )
+    interrupt_mute_proxy_texts = _validated_texts(
+        mute_config.get("proxy_texts", (DEFAULT_INTERRUPT_MUTE_PROXY_TEXT,)),
+        DEFAULT_INTERRUPT_MUTE_PROXY_TEXT,
+        "[repeater] mute.proxy_texts 非法或为空，回退为默认顶替禁言文本",
+        logger,
+    )
 
     # LLM供应商
     intelligent_interrupt_provider_mode = (
@@ -372,6 +390,16 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         logger,
         "智能禁言",
     )
+    intelligent_proxy_mute_prompt = _validated_required_text(
+        intelligent_mute_config.get(
+            "proxy_prompt",
+            DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT,
+        ),
+        "intelligent_mute.proxy_prompt",
+        DEFAULT_INTELLIGENT_PROXY_MUTE_PROMPT,
+        logger,
+        "智能顶替禁言",
+    )
 
     return RepeaterSettings(
         config=config,
@@ -401,6 +429,8 @@ def build_settings(config: dict[str, Any], logger: Any) -> RepeaterSettings:
         intelligent_interrupt_mute_prompt=intelligent_interrupt_mute_prompt,
         repeat_cooldown_seconds=repeat_cooldown_seconds,
         intelligent_timeout_seconds=intelligent_timeout_seconds,
+        interrupt_mute_proxy_texts=interrupt_mute_proxy_texts,
+        intelligent_proxy_mute_prompt=intelligent_proxy_mute_prompt,
     )
 
 
